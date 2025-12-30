@@ -124,9 +124,20 @@ REASON: <brief reason>"""),
     def retrieve_policy(self, question: str, category: str, num_chunks: int = 3) -> list:
         """
         Tool 2: Retrieve relevant policy documents with source tracking
+        Routes to appropriate indexes based on category
         """
         try:
-            results = self.rag.search(question, num_results=num_chunks)
+            # Route to appropriate document indexes based on category
+            if category in ["HR", "Leave"]:
+                # Search HR policy indexes: Leave Policy.pdf and HR_Policy_Art_Technology.pdf
+                results = self.rag.search_hr_policies(question, num_results=num_chunks)
+            elif category in ["IT", "Compliance"]:
+                # Search IT policy indexes: IT_Security_Policy_AI_Usage.pdf and Compliance Handbook.pdf
+                results = self.rag.search_it_policies(question, num_results=num_chunks)
+            else:
+                # Category doesn't match HR/Leave or IT/Compliance - return empty results
+                results = []
+
             return results
         except Exception as e:
             print(f"⚠️ Retrieval error: {e}")
@@ -524,7 +535,7 @@ class PolicyAssistant:
 
         if verbose:
             print("\n" + "="*70)
-            print("✓ Policy Assistant Ready!")
+            print("[OK] Policy Assistant Ready!")
             print("="*70)
     
     def ask(self, question: str) -> dict:
@@ -601,7 +612,7 @@ def main():
     # Initialize system (quiet mode)
     print("\n Loading policy documents and initializing AI system...")
     assistant = PolicyAssistant(docs_folder="./docs", verbose=False)
-    print("✓ Ready!\n")
+    print("[OK] Ready!\n")
 
     print("="*70)
     print("Type your question or 'examples' to see sample questions.")
