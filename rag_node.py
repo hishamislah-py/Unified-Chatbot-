@@ -15,14 +15,16 @@ load_dotenv()
 
 class SimpleRAG:
 
-    def __init__(self, docs_folder="./docs"):
+    def __init__(self, docs_folder="./docs", index_folder="./faiss_indexes"):
         """
         Initialize the RAG system with separate indexes for each PDF
 
         Args:
             docs_folder: Folder containing your PDF files
+            index_folder: Folder to save/load FAISS indexes
         """
         self.docs_folder = Path(docs_folder)
+        self.index_folder = Path(index_folder)
         self.vector_stores = {}  # Dictionary to store separate indexes for each PDF
         self.embeddings = None
 
@@ -30,11 +32,20 @@ class SimpleRAG:
         self.hr_documents = ["Leave Policy.pdf", "HR_Policy_Art_Technology.pdf"]
         self.it_documents = ["IT_Security_Policy_AI_Usage.pdf", "Compliance Handbook.pdf"]
 
-    def setup(self, verbose=True):
+        # Create index folder if it doesn't exist
+        self.index_folder.mkdir(exist_ok=True)
 
+    def setup(self, verbose=True, force_rebuild=False):
+        """
+        Setup the RAG system - load existing indexes or create new ones
+
+        Args:
+            verbose: Print progress messages
+            force_rebuild: Force rebuild indexes even if they exist
+        """
         if verbose:
             print("\n" + "="*60)
-            print("STEP 1: Loading PDF Documents")
+            print("STEP 1: Checking for Existing Indexes")
             print("="*60)
 
         # Check if folder exists
@@ -64,52 +75,101 @@ class SimpleRAG:
 
         if verbose:
             print("[OK] Embeddings model loaded")
-            print("\n" + "="*60)
-            print("STEP 3: Creating Separate Indexes for Each PDF")
-            print("="*60)
 
-        # Create separate index for each PDF
+        # Check if we can load existing indexes
+        all_indexes_exist = True
         for pdf_file in pdf_files:
+            index_name = pdf_file.stem  # Filename without extension
+            index_path = self.index_folder / index_name
+            if not index_path.exists():
+                all_indexes_exist = False
+                break
+
+        # Load existing indexes if available and not forcing rebuild
+        if all_indexes_exist and not force_rebuild:
             if verbose:
-                print(f"\nProcessing: {pdf_file.name}")
+                print("\n" + "="*60)
+                print("STEP 3: Loading Existing Indexes")
+                print("="*60)
 
-            # Load single PDF
-            loader = PyPDFLoader(str(pdf_file))
-            pages = loader.load()
+            for pdf_file in pdf_files:
+                index_name = pdf_file.stem
+                index_path = self.index_folder / index_name
 
-            # Add filename to each page
-            for page in pages:
-                page.metadata["source"] = pdf_file.name
+                if verbose:
+                    print(f"\nLoading: {pdf_file.name}")
 
-            if verbose:
-                print(f"  - Loaded {len(pages)} pages")
+                # Load FAISS index from disk
+                vector_store = FAISS.load_local(
+                    str(index_path),
+                    self.embeddings,
+                    allow_dangerous_deserialization=True
+                )
 
-            # Split into chunks
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=500,
-                chunk_overlap=100,
-            )
-            chunks = text_splitter.split_documents(pages)
+                # Store with PDF name as key
+                self.vector_stores[pdf_file.name] = vector_store
 
-            if verbose:
-                print(f"  - Created {len(chunks)} chunks")
-
-            # Create FAISS vector store for this PDF
-            vector_store = FAISS.from_documents(
-                documents=chunks,
-                embedding=self.embeddings
-            )
-
-            # Store with PDF name as key
-            self.vector_stores[pdf_file.name] = vector_store
+                if verbose:
+                    print(f"  [OK] Index loaded for {pdf_file.name}")
 
             if verbose:
-                print(f"  [OK] Index created for {pdf_file.name}")
+                print("\n" + "="*60)
+                print(f"[OK] Loaded {len(self.vector_stores)} existing indexes")
+                print("="*60)
 
-        if verbose:
-            print("\n" + "="*60)
-            print(f"[OK] Created {len(self.vector_stores)} separate indexes")
-            print("="*60)
+        else:
+            # Create new indexes
+            if verbose:
+                print("\n" + "="*60)
+                print("STEP 3: Creating New Indexes")
+                print("="*60)
+
+            for pdf_file in pdf_files:
+                if verbose:
+                    print(f"\nProcessing: {pdf_file.name}")
+
+                # Load single PDF
+                loader = PyPDFLoader(str(pdf_file))
+                pages = loader.load()
+
+                # Add filename to each page
+                for page in pages:
+                    page.metadata["source"] = pdf_file.name
+
+                if verbose:
+                    print(f"  - Loaded {len(pages)} pages")
+
+                # Split into chunks
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=500,
+                    chunk_overlap=100,
+                )
+                chunks = text_splitter.split_documents(pages)
+
+                if verbose:
+                    print(f"  - Created {len(chunks)} chunks")
+
+                # Create FAISS vector store for this PDF
+                vector_store = FAISS.from_documents(
+                    documents=chunks,
+                    embedding=self.embeddings
+                )
+
+                # Save index to disk
+                index_name = pdf_file.stem
+                index_path = self.index_folder / index_name
+                vector_store.save_local(str(index_path))
+
+                # Store with PDF name as key
+                self.vector_stores[pdf_file.name] = vector_store
+
+                if verbose:
+                    print(f"  [OK] Index created and saved for {pdf_file.name}")
+
+            if verbose:
+                print("\n" + "="*60)
+                print(f"[OK] Created and saved {len(self.vector_stores)} indexes")
+                print("="*60)
 
     def search(self, question, num_results=3, pdf_names=None):
         """
