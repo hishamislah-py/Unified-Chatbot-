@@ -189,15 +189,28 @@ def hr_out_of_scope_node(state: "MultiAgentState") -> "MultiAgentState":
 def it_agent_entry_node(state: "MultiAgentState") -> "MultiAgentState":
     """
     IT Agent entry point - classifies IT-specific intent
+    Uses IT-specific classifier with troubleshooting support
     """
     state.setdefault('workflow_path', []).append('IT Agent Entry')
     state['current_agent'] = 'it'
 
-    tools = PolicyTools()
-    classification = tools.classify_intent(state['current_message'])
+    try:
+        tools = PolicyTools()
+        # Use IT-specific intent classifier with troubleshooting support
+        classification = tools.classify_it_intent(state['current_message'])
 
-    state['specialist_intent'] = classification['intent']
-    state['category'] = classification['category']
+        state['specialist_intent'] = classification['intent']
+        state['category'] = classification['category']
+
+        # Debug logging
+        print(f"[IT Entry] Message: {state['current_message']}")
+        print(f"[IT Entry] Classified intent: {classification['intent']}")
+
+    except Exception as e:
+        # If classification fails, default to troubleshooting
+        print(f"[IT Entry] Classification error: {e}")
+        state['specialist_intent'] = 'troubleshooting'
+        state['category'] = 'IT'
 
     return state
 
@@ -346,6 +359,60 @@ def it_out_of_scope_node(state: "MultiAgentState") -> "MultiAgentState":
         "Your question seems outside my area of expertise.\n\n"
         "If you need HR assistance or have questions about employee policies, please ask the "
         "Personal Assistant to connect you to the HR Agent."
+    )
+    state['sources'] = []
+    state['is_valid'] = True
+
+    return state
+
+
+def it_troubleshooting_node(state: "MultiAgentState") -> "MultiAgentState":
+    """
+    IT troubleshooting - provides solutions using LLM knowledge (not RAG)
+    For technical issues like 'Teams not working', 'mouse not working', etc.
+    """
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.output_parsers import StrOutputParser
+
+    state.setdefault('workflow_path', []).append('IT Troubleshooting')
+
+    tools = PolicyTools()
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are an IT Support specialist. Provide helpful troubleshooting steps for the user's technical issue.
+
+RULES:
+1. Give practical solutions the user can try immediately
+2. Format your response with clear numbered steps
+3. Start with the simplest solutions first
+4. Be concise but thorough
+5. End with: "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
+"""),
+        ("user", "{question}")
+    ])
+
+    chain = prompt | tools.llm | StrOutputParser()
+    answer = chain.invoke({"question": state['current_message']})
+
+    state['answer'] = f"[IT Support] {answer}"
+    state['sources'] = []
+    state['is_valid'] = True
+
+    return state
+
+
+def it_jira_offer_node(state: "MultiAgentState") -> "MultiAgentState":
+    """
+    IT JIRA ticket offer - when previous solution didn't work
+    Offers to create a JIRA ticket for further assistance
+    """
+    state.setdefault('workflow_path', []).append('IT JIRA Offer')
+
+    state['answer'] = (
+        "[IT Support] I'm sorry the previous solutions didn't resolve your issue. "
+        "Would you like me to create a JIRA ticket for further assistance? "
+        "An IT support technician will review your case and get back to you.\n\n"
+        "(JIRA integration coming soon - for now, please contact IT helpdesk directly)"
     )
     state['sources'] = []
     state['is_valid'] = True

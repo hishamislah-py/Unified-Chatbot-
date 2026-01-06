@@ -120,7 +120,102 @@ REASON: <brief reason>"""),
             "intent": intent,
             "category": category
         }
-    
+
+    def classify_it_intent(self, question: str) -> dict:
+        """
+        IT-specific intent classifier with troubleshooting support
+        Uses keyword-based detection first, then LLM as fallback
+        """
+        question_lower = question.lower()
+
+        # =================================================================
+        # STEP 1: Keyword-based detection (fast and reliable)
+        # =================================================================
+
+        # Troubleshooting keywords - technical issues
+        troubleshooting_keywords = [
+            "not working", "doesn't work", "won't work", "isn't working",
+            "won't open", "can't open", "won't start", "can't start",
+            "crashed", "crashing", "freezing", "frozen", "stuck",
+            "error", "failed", "failing", "broken",
+            "slow", "lagging", "hanging",
+            "disconnecting", "disconnect", "can't connect", "connection issue",
+            "won't load", "not loading", "not responding",
+            "help with", "having trouble", "having issues", "having problem",
+            "fix", "repair", "resolve", "troubleshoot",
+            "teams", "outlook", "excel", "word", "powerpoint", "zoom", "slack",
+            "vpn", "wifi", "internet", "network", "printer", "mouse", "keyboard",
+            "monitor", "laptop", "computer", "screen", "audio", "microphone", "camera"
+        ]
+
+        # Follow-up issue keywords
+        follow_up_keywords = [
+            "still not working", "still doesn't work", "still broken",
+            "didn't work", "didn't help", "not resolved", "still having",
+            "tried that", "already tried", "doesn't fix", "still the same"
+        ]
+
+        # Policy keywords
+        policy_keywords = [
+            "policy", "policies", "guideline", "guidelines", "rule", "rules",
+            "compliance", "regulation", "requirement", "standard", "protocol"
+        ]
+
+        # Check for follow-up issues first (highest priority)
+        for keyword in follow_up_keywords:
+            if keyword in question_lower:
+                return {"intent": "follow_up_issue", "category": "IT"}
+
+        # Check for policy queries
+        for keyword in policy_keywords:
+            if keyword in question_lower:
+                return {"intent": "policy_query", "category": "IT"}
+
+        # Check for troubleshooting issues
+        for keyword in troubleshooting_keywords:
+            if keyword in question_lower:
+                return {"intent": "troubleshooting", "category": "IT"}
+
+        # =================================================================
+        # STEP 2: LLM-based classification for edge cases
+        # =================================================================
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """Classify this IT support query into ONE category:
+- troubleshooting: Technical problems (apps not working, errors, hardware issues)
+- policy_query: Questions about IT policies or rules
+- follow_up_issue: User says previous solution didn't work
+- ambiguous: Too vague to understand
+- out_of_scope: Not IT-related (HR, weather, etc.)
+
+Reply with ONLY the category name, nothing else."""),
+            ("user", "{question}")
+        ])
+
+        chain = prompt | self.llm | StrOutputParser()
+        response = chain.invoke({"question": question})
+
+        # Parse response
+        intent_raw = response.strip().lower().split()[0] if response.strip() else "troubleshooting"
+        intent_raw = intent_raw.strip('.,!?:;"\'')
+
+        # Map to valid intents
+        if "troubleshoot" in intent_raw:
+            intent = "troubleshooting"
+        elif "policy" in intent_raw:
+            intent = "policy_query"
+        elif "follow" in intent_raw:
+            intent = "follow_up_issue"
+        elif "ambiguous" in intent_raw:
+            intent = "ambiguous"
+        elif "scope" in intent_raw or "out" in intent_raw:
+            intent = "out_of_scope"
+        else:
+            # Default to troubleshooting for IT queries
+            intent = "troubleshooting"
+
+        return {"intent": intent, "category": "IT"}
+
     def retrieve_policy(self, question: str, category: str, num_chunks: int = 3) -> list:
         """
         Tool 2: Retrieve relevant policy documents with source tracking

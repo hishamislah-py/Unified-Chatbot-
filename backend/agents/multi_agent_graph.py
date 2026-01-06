@@ -16,6 +16,8 @@ from .specialist_agents import (
     it_answer_generation_node,
     it_validation_node,
     it_out_of_scope_node,
+    it_troubleshooting_node,
+    it_jira_offer_node,
 )
 
 
@@ -94,17 +96,33 @@ def route_from_hr_validation(state: MultiAgentState) -> Literal["hr_rag_retrieva
     return "end"
 
 
-def route_from_it_entry(state: MultiAgentState) -> Literal["it_clarification", "it_rag_retrieval", "it_out_of_scope"]:
+def route_from_it_entry(state: MultiAgentState) -> Literal[
+    "it_clarification", "it_rag_retrieval", "it_troubleshooting",
+    "it_jira_offer", "it_out_of_scope"
+]:
     """
     Router 4: Route within IT agent based on intent
+    Supports: policy_query, troubleshooting, follow_up_issue, ambiguous, out_of_scope
     """
     intent = state.get('specialist_intent', '')
 
+    # Debug logging
+    print(f"[IT Router] Routing with intent: '{intent}'")
+
     if intent == "ambiguous":
+        print("[IT Router] -> it_clarification")
         return "it_clarification"
     elif intent == "policy_query":
+        print("[IT Router] -> it_rag_retrieval")
         return "it_rag_retrieval"
-    else:  # out_of_scope or simple_fact
+    elif intent == "troubleshooting":
+        print("[IT Router] -> it_troubleshooting")
+        return "it_troubleshooting"
+    elif intent == "follow_up_issue":
+        print("[IT Router] -> it_jira_offer")
+        return "it_jira_offer"
+    else:  # out_of_scope
+        print(f"[IT Router] -> it_out_of_scope (unrecognized intent: '{intent}')")
         return "it_out_of_scope"
 
 
@@ -165,6 +183,8 @@ def create_multi_agent_graph():
     workflow.add_node("it_answer_generation", it_answer_generation_node)
     workflow.add_node("it_validation", it_validation_node)
     workflow.add_node("it_out_of_scope", it_out_of_scope_node)
+    workflow.add_node("it_troubleshooting", it_troubleshooting_node)
+    workflow.add_node("it_jira_offer", it_jira_offer_node)
 
     # ==========================================================================
     # SET ENTRY POINT
@@ -226,13 +246,15 @@ def create_multi_agent_graph():
     # ADD EDGES - IT AGENT
     # ==========================================================================
 
-    # IT entry routes to clarification, RAG, or out-of-scope
+    # IT entry routes to clarification, RAG, troubleshooting, JIRA offer, or out-of-scope
     workflow.add_conditional_edges(
         "it_entry",
         route_from_it_entry,
         {
             "it_clarification": "it_clarification",
             "it_rag_retrieval": "it_rag_retrieval",
+            "it_troubleshooting": "it_troubleshooting",
+            "it_jira_offer": "it_jira_offer",
             "it_out_of_scope": "it_out_of_scope"
         }
     )
@@ -253,9 +275,11 @@ def create_multi_agent_graph():
         }
     )
 
-    # Clarification and out-of-scope go directly to END
+    # Clarification, out-of-scope, troubleshooting, and JIRA offer go directly to END
     workflow.add_edge("it_clarification", END)
     workflow.add_edge("it_out_of_scope", END)
+    workflow.add_edge("it_troubleshooting", END)
+    workflow.add_edge("it_jira_offer", END)
 
     # ==========================================================================
     # COMPILE WITH MEMORY

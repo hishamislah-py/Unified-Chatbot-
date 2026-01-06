@@ -511,11 +511,11 @@ async def chat_stream(request: ChatRequest):
                         yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
                         await asyncio.sleep(0.01)
 
-            elif entry_agent in ["hr", "it"]:
-                # Specialist agents - use RAG pipeline with streaming
+            elif entry_agent == "hr":
+                # HR Agent - use RAG pipeline with streaming
                 policy_tools = PolicyTools()
 
-                # Intent classification
+                # Intent classification for HR
                 classification = policy_tools.classify_intent(request.message)
                 specialist_intent = classification['intent']
                 category = classification['category']
@@ -524,10 +524,9 @@ async def chat_stream(request: ChatRequest):
                     # Clarification needed
                     clarification = policy_tools.generate_clarification(
                         request.message,
-                        f"Your question about {entry_agent.upper()} policies needs more detail"
+                        "Your question about HR policies needs more detail"
                     )
-                    prefix = "[HR Agent] " if entry_agent == "hr" else "[IT Support] "
-                    response_text = f"{prefix}{clarification}"
+                    response_text = f"[HR Agent] {clarification}"
 
                     for char in response_text:
                         accumulated_answer += char
@@ -537,16 +536,14 @@ async def chat_stream(request: ChatRequest):
 
                 elif specialist_intent == "policy_query":
                     # RAG retrieval and answer generation with streaming
-                    if entry_agent == "hr" and category not in ["HR", "Leave"]:
+                    if category not in ["HR", "Leave"]:
                         category = "HR"
-                    elif entry_agent == "it" and category not in ["IT", "Compliance"]:
-                        category = "IT"
 
                     # Retrieve relevant chunks
                     chunks = policy_tools.retrieve_policy(request.message, category, num_chunks=4)
 
                     # Stream the answer
-                    prefix = "[HR Agent] " if entry_agent == "hr" else "[IT Support] "
+                    prefix = "[HR Agent] "
                     accumulated_answer = prefix
 
                     # Send prefix first
@@ -573,22 +570,141 @@ async def chat_stream(request: ChatRequest):
                     ]
 
                 else:  # out_of_scope
-                    if entry_agent == "hr":
-                        response_text = (
-                            "[HR Agent] I specialize in HR and Leave policies (hiring, termination, probation, "
-                            "annual leave, sick leave, maternity leave, etc.). "
-                            "Your question seems outside my area of expertise.\n\n"
-                            "If you need IT support or have technical questions, please ask the Personal Assistant "
-                            "to connect you to IT Support."
-                        )
-                    else:  # it
-                        response_text = (
-                            "[IT Support] I specialize in IT Security and Compliance policies (device security, "
-                            "passwords, VPN, data privacy, code of conduct, etc.). "
-                            "Your question seems outside my area of expertise.\n\n"
-                            "If you need HR assistance or have questions about employee policies, please ask the "
-                            "Personal Assistant to connect you to the HR Agent."
-                        )
+                    response_text = (
+                        "[HR Agent] I specialize in HR and Leave policies (hiring, termination, probation, "
+                        "annual leave, sick leave, maternity leave, etc.). "
+                        "Your question seems outside my area of expertise.\n\n"
+                        "If you need IT support or have technical questions, please ask the Personal Assistant "
+                        "to connect you to IT Support."
+                    )
+
+                    for char in response_text:
+                        accumulated_answer += char
+                        yield f"event: token\n"
+                        yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+                        await asyncio.sleep(0.01)
+
+            elif entry_agent == "it":
+                # IT Agent - use IT-specific intent classifier with troubleshooting support
+                policy_tools = PolicyTools()
+
+                # Use IT-specific intent classification (supports troubleshooting)
+                classification = policy_tools.classify_it_intent(request.message)
+                specialist_intent = classification['intent']
+                category = classification['category']
+
+                print(f"[IT Stream] Message: {request.message}")
+                print(f"[IT Stream] Classified intent: {specialist_intent}")
+
+                if specialist_intent == "ambiguous":
+                    # Clarification needed
+                    clarification = policy_tools.generate_clarification(
+                        request.message,
+                        "Your question about IT policies needs more detail"
+                    )
+                    response_text = f"[IT Support] {clarification}"
+
+                    for char in response_text:
+                        accumulated_answer += char
+                        yield f"event: token\n"
+                        yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+                        await asyncio.sleep(0.01)
+
+                elif specialist_intent == "policy_query":
+                    # RAG retrieval for IT policies
+                    if category not in ["IT", "Compliance"]:
+                        category = "IT"
+
+                    # Retrieve relevant chunks
+                    chunks = policy_tools.retrieve_policy(request.message, category, num_chunks=4)
+
+                    # Stream the answer
+                    prefix = "[IT Support] "
+                    accumulated_answer = prefix
+
+                    # Send prefix first
+                    for char in prefix:
+                        yield f"event: token\n"
+                        yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+                        await asyncio.sleep(0.01)
+
+                    # Stream answer tokens
+                    async for token in policy_tools.generate_answer_with_citations_stream(request.message, chunks):
+                        accumulated_answer += token
+                        yield f"event: token\n"
+                        yield f"data: {json.dumps({'content': token, 'type': 'token'})}\n\n"
+
+                    # Extract sources
+                    final_sources = [
+                        {
+                            "source": chunk['source'],
+                            "page": chunk['page'],
+                            "rank": chunk['rank'],
+                            "preview": chunk['content'][:200] + "..." if len(chunk['content']) > 200 else chunk['content']
+                        }
+                        for chunk in chunks
+                    ]
+
+                elif specialist_intent == "troubleshooting":
+                    # Troubleshooting - use LLM knowledge (NOT RAG)
+                    from langchain_core.prompts import ChatPromptTemplate
+                    from langchain_core.output_parsers import StrOutputParser
+
+                    prompt = ChatPromptTemplate.from_messages([
+                        ("system", """You are an IT Support specialist. Provide helpful troubleshooting steps for the user's technical issue.
+
+RULES:
+1. Give practical solutions the user can try immediately
+2. Format your response with clear numbered steps
+3. Start with the simplest solutions first
+4. Be concise but thorough
+5. End with: "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
+"""),
+                        ("user", "{question}")
+                    ])
+
+                    chain = prompt | policy_tools.llm | StrOutputParser()
+
+                    # Stream the answer
+                    prefix = "[IT Support] "
+                    accumulated_answer = prefix
+
+                    # Send prefix first
+                    for char in prefix:
+                        yield f"event: token\n"
+                        yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+                        await asyncio.sleep(0.01)
+
+                    # Stream troubleshooting answer
+                    async for chunk in (prompt | policy_tools.llm).astream({"question": request.message}):
+                        if hasattr(chunk, 'content') and chunk.content:
+                            accumulated_answer += chunk.content
+                            yield f"event: token\n"
+                            yield f"data: {json.dumps({'content': chunk.content, 'type': 'token'})}\n\n"
+
+                elif specialist_intent == "follow_up_issue":
+                    # User says previous solution didn't work - offer JIRA ticket
+                    response_text = (
+                        "[IT Support] I'm sorry the previous solutions didn't resolve your issue. "
+                        "Would you like me to create a JIRA ticket for further assistance? "
+                        "An IT support technician will review your case and get back to you.\n\n"
+                        "(JIRA integration coming soon - for now, please contact IT helpdesk directly)"
+                    )
+
+                    for char in response_text:
+                        accumulated_answer += char
+                        yield f"event: token\n"
+                        yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+                        await asyncio.sleep(0.01)
+
+                else:  # out_of_scope
+                    response_text = (
+                        "[IT Support] I specialize in IT Security and Compliance policies (device security, "
+                        "passwords, VPN, data privacy, code of conduct, etc.). "
+                        "Your question seems outside my area of expertise.\n\n"
+                        "If you need HR assistance or have questions about employee policies, please ask the "
+                        "Personal Assistant to connect you to the HR Agent."
+                    )
 
                     for char in response_text:
                         accumulated_answer += char
