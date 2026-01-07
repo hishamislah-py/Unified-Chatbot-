@@ -10,14 +10,43 @@ This multi-agent chatbot system features:
 ## Architecture
 
 ```
-Frontend (React + TypeScript)
-    ↓ HTTP
-FastAPI Server (Python)
-    ↓
-LangGraph Multi-Agent System
-    ├── Personal Assistant
-    ├── HR Agent (RAG: Leave Policy, HR Policy)
-    └── IT Agent (RAG: IT Security, Compliance)
+┌─────────────────────────────────────────────────────────────┐
+│                      Frontend (React)                        │
+│  ┌──────────────────┐     ┌──────────────────────────────┐  │
+│  │  Voice Assistant │     │       Text Chat UI           │  │
+│  │  (LiveKit React) │     │      (AIChatCard)            │  │
+│  └────────┬─────────┘     └──────────────┬───────────────┘  │
+└───────────┼──────────────────────────────┼──────────────────┘
+            │ WebSocket                     │ HTTP/SSE
+            ▼                               ▼
+┌───────────────────────┐     ┌──────────────────────────────┐
+│   LiveKit Server      │     │     FastAPI Server           │
+│   (Voice Rooms)       │     │     (Port 8000)              │
+└───────────┬───────────┘     └──────────────┬───────────────┘
+            │                                 │
+            ▼                                 ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  Voice Agent Worker                          │
+│  ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────────┐  │
+│  │   VAD   │ → │   STT   │ → │Chat API │ → │    TTS      │  │
+│  │ Silero  │   │  Groq   │   │  LLM    │   │  Edge TTS   │  │
+│  └─────────┘   └─────────┘   └─────────┘   └─────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────┐
+│              LangGraph Multi-Agent System                    │
+│    ┌──────────────────┐                                     │
+│    │ Personal Assistant│                                    │
+│    └────────┬─────────┘                                     │
+│             │ Transfer                                       │
+│    ┌────────┴────────┐                                      │
+│    ▼                 ▼                                      │
+│ ┌──────────┐   ┌──────────┐                                 │
+│ │ HR Agent │   │ IT Agent │                                 │
+│ │  (RAG)   │   │  (RAG)   │                                 │
+│ └──────────┘   └──────────┘                                 │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Installation
@@ -45,10 +74,19 @@ LangGraph Multi-Agent System
    pip install -r requirements.txt
    ```
 
-4. **Create .env file** in `backend/` directory with your API keys:
+4. **Create .env file** in `backend/env/` directory with your API keys:
    ```env
+   # Required for LLM and STT
    GROQ_API_KEY=your_groq_api_key_here
+
+   # Required for Voice Agent (LiveKit)
+   LIVEKIT_URL=ws://localhost:7880
+   LIVEKIT_API_KEY=devkey
+   LIVEKIT_API_SECRET=secret
    ```
+
+   > **Note:** For local development, use LiveKit's development server.
+   > For production, get credentials from [LiveKit Cloud](https://cloud.livekit.io).
 
 5. **Verify documents exist**
    Ensure these PDFs are in `backend/docs/`:
@@ -75,13 +113,13 @@ LangGraph Multi-Agent System
 
 ```bash
 cd backend
-python api/server.py  |     uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 Expected output:
 ```
 ======================================================================
-STARTING MULTI-AGENT CHATBOT SERVER
+STARTING MULTI-AGENT CHATBOT WITH VOICE SUPPORT
 ======================================================================
 
 [1/3] Initializing RAG system...
@@ -101,7 +139,32 @@ API Documentation: http://localhost:8000/docs
 
 **Backend runs on:** `http://localhost:8000`
 
-### Terminal 2: Start Frontend
+### Terminal 2: Start Voice Agent (Optional)
+
+```bash
+cd backend
+python -m voice.voice_agent dev
+```
+
+Expected output:
+```
+============================================================
+LiveKit Voice Agent
+============================================================
+LIVEKIT_URL: ws://localhost:7880
+GROQ_API_KEY: set
+============================================================
+
+Starting Voice Agent Worker...
+```
+
+> **Note:** Voice agent requires LiveKit server running. For local dev:
+> ```bash
+> # Install LiveKit CLI, then:
+> livekit-server --dev
+> ```
+
+### Terminal 3: Start Frontend
 
 ```bash
 cd frontend
@@ -109,6 +172,17 @@ npm run dev
 ```
 
 **Frontend runs on:** `http://localhost:5173`
+
+### Quick Start (Text Chat Only)
+
+If you only need text chat (no voice):
+```bash
+# Terminal 1
+cd backend && uvicorn main:app --port 8000
+
+# Terminal 2
+cd frontend && npm run dev
+```
 
 ## Testing Guide
 
@@ -211,7 +285,9 @@ Visit `http://localhost:8000/docs` when server is running for interactive API do
 
 - **POST /api/sessions** - Create new chat session
 - **GET /api/sessions/{session_id}** - Get session info
-- **POST /api/chat** - Send chat message
+- **POST /api/chat** - Send chat message (non-streaming)
+- **POST /api/chat/stream** - Send chat message (SSE streaming)
+- **POST /api/livekit/token** - Generate LiveKit room token
 - **GET /api/health** - Health check
 
 ## Troubleshooting
@@ -241,6 +317,30 @@ Visit `http://localhost:8000/docs` when server is running for interactive API do
 - Verify RAG is retrieving documents (check backend logs)
 - Ask specific policy questions (e.g., "sick leave policy")
 
+### Voice Agent Issues
+
+**Error: "LIVEKIT_URL not set"**
+- Create `.env` file in `backend/env/` directory
+- Add `LIVEKIT_URL=ws://localhost:7880`
+
+**Error: "Failed to connect to LiveKit"**
+- Start LiveKit server: `livekit-server --dev`
+- Verify LIVEKIT_URL matches server address
+
+**Error: "streaming is not supported by this TTS"**
+- Edge TTS uses chunked mode, not streaming
+- This is expected behavior, use current configuration
+
+**Voice response is slow**
+- Check VAD settings (min_silence_duration should be 0.25s)
+- Ensure backend has no artificial delays
+- Check network latency to Groq API
+
+**No audio output**
+- Check browser microphone permissions
+- Verify LiveKit room connection
+- Check console for WebRTC errors
+
 ### Common Issues
 
 **Agent not transferring:**
@@ -250,6 +350,11 @@ Visit `http://localhost:8000/docs` when server is running for interactive API do
 **Out-of-scope questions getting answers:**
 - Verify the question is truly out-of-scope
 - Check workflow_path in response to see which nodes executed
+
+**Session not found error:**
+- Server may have restarted (sessions are in-memory)
+- Refresh the page to create a new session
+- Sessions auto-recreate on next request
 
 ## Development Tips
 
@@ -294,28 +399,37 @@ backend/
 │   ├── models.py                  # Pydantic schemas
 │   ├── session_manager.py         # Session handling
 │   └── server.py                  # FastAPI app
+├── voice/
+│   ├── __init__.py
+│   ├── voice_agent.py             # LiveKit voice agent
+│   ├── chat_api_llm.py            # Custom LLM (routes to Chat API)
+│   └── edge_tts_adapter.py        # Free TTS adapter
 ├── docs/
 │   ├── Leave Policy.pdf
 │   ├── HR_Policy_Art_Technology.pdf
 │   ├── IT_Security_Policy_AI_Usage.pdf
 │   └── Compliance Handbook.pdf
+├── env/
+│   └── .env                       # API keys (create this)
+├── main.py                        # Main entry point
 ├── rag_node.py                    # RAG system
-├── langGraph.py                   # PolicyTools (reused)
-├── requirements.txt
-└── .env                           # API keys (create this)
+├── langGraph.py                   # PolicyTools
+└── requirements.txt
 
 frontend/
 ├── src/
 │   ├── services/
-│   │   └── api.ts                # API client
+│   │   └── api.ts                 # API client
 │   └── components/
 │       └── ui/
-│           └── ai-chat.tsx       # Chat UI
+│           ├── ai-chat.tsx        # Text Chat UI
+│           └── voice-assistant.tsx # Voice UI (LiveKit)
 └── ...
 ```
 
 ## Success Criteria Checklist
 
+### Text Chat
 - [ ] Personal Assistant greets warmly
 - [ ] Personal Assistant does NOT auto-transfer (only on explicit request)
 - [ ] Transfer to HR works with "connect me to HR"
@@ -328,6 +442,15 @@ frontend/
 - [ ] Agent tabs maintain conversation history
 - [ ] Validation retries work
 - [ ] Error handling works gracefully
+
+### Voice Agent
+- [ ] Voice agent connects to LiveKit room
+- [ ] Speech-to-text transcribes user speech
+- [ ] Responses use same multi-agent system as text
+- [ ] Text-to-speech plays response audio
+- [ ] Agent transfers work via voice ("connect to IT")
+- [ ] Different voices for each agent (Personal/HR/IT)
+- [ ] Response latency is acceptable (~2-4 seconds)
 
 ## Next Steps
 
