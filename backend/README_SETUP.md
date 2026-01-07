@@ -184,6 +184,29 @@ cd backend && uvicorn main:app --port 8000
 cd frontend && npm run dev
 ```
 
+## Docker Setup
+
+### Running LiveKit Server with Docker
+
+The easiest way to run LiveKit for local development is using Docker:
+
+```bash
+cd backend
+docker-compose -f docker-compose.livekit.yml up -d
+```
+
+This starts:
+- **LiveKit Server** on `http://localhost:7880` (HTTP API)
+- **WebSocket** on `ws://localhost:7881` (WebRTC signaling)
+- **UDP ports** 50000-50100 for RTP media
+
+**Default credentials (dev mode):**
+- API Key: `devkey`
+- API Secret: `devsecret`
+
+
+```
+
 ## Testing Guide
 
 ### 1. Test Personal Assistant
