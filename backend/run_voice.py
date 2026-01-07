@@ -68,11 +68,16 @@ Keep your acknowledgments brief as responses come from the chat API.""",
     chat_llm.set_agent_change_callback(on_agent_change)
 
     # Create session with STT (Groq), LLM (Chat API), TTS (Edge TTS), VAD (Silero)
+    # Optimized VAD settings for faster response
     session = AgentSession(
         stt=STT(model="whisper-large-v3"),
         llm=chat_llm,
         tts=tts,
-        vad=VAD.load(),
+        vad=VAD.load(
+            min_silence_duration=0.25,  # 250ms (was 550ms) - faster end detection
+            min_speech_duration=0.05,   # 50ms - minimum speech to register
+            prefix_padding_duration=0.3, # 300ms (was 500ms) - less audio prefix
+        ),
     )
     print("[VOICE] Using Chat API LLM (RAG + Multi-Agent)")
     print(f"[VOICE] Agent voices: Personal={AGENT_VOICES['personal']}, HR={AGENT_VOICES['hr']}, IT={AGENT_VOICES['it']}")

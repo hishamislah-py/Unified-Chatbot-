@@ -566,7 +566,7 @@ async def chat_stream(request: ChatRequest):
                         accumulated_answer += char
                         yield f"event: token\n"
                         yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                        await asyncio.sleep(0.01)  # Small delay for smooth streaming
+                        # Removed delay for faster streaming
 
                 elif classification['intent'] == "greeting":
                     response_text = (
@@ -580,7 +580,6 @@ async def chat_stream(request: ChatRequest):
                         accumulated_answer += char
                         yield f"event: token\n"
                         yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                        await asyncio.sleep(0.01)
 
                 elif classification['intent'] == "general_query":
                     # Stream general query answer
@@ -598,7 +597,6 @@ async def chat_stream(request: ChatRequest):
                         accumulated_answer += char
                         yield f"event: token\n"
                         yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                        await asyncio.sleep(0.01)
 
             elif entry_agent == "hr":
                 # HR Agent - first check for transfer requests
@@ -623,7 +621,6 @@ async def chat_stream(request: ChatRequest):
                         accumulated_answer += char
                         yield f"event: token\n"
                         yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                        await asyncio.sleep(0.01)
 
                 else:
                     # Continue with HR Agent processing
@@ -646,8 +643,7 @@ async def chat_stream(request: ChatRequest):
                             accumulated_answer += char
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                            await asyncio.sleep(0.01)
-
+    
                     elif specialist_intent == "policy_query":
                         # RAG retrieval and answer generation with streaming
                         if category not in ["HR", "Leave"]:
@@ -664,8 +660,7 @@ async def chat_stream(request: ChatRequest):
                         for char in prefix:
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                            await asyncio.sleep(0.01)
-
+    
                         # Stream answer tokens
                         async for token in policy_tools.generate_answer_with_citations_stream(request.message, chunks):
                             accumulated_answer += token
@@ -696,8 +691,7 @@ async def chat_stream(request: ChatRequest):
                             accumulated_answer += char
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                            await asyncio.sleep(0.01)
-
+    
             elif entry_agent == "it":
                 # IT Agent - first check for transfer requests
                 pa_tools = PersonalAssistantTools()
@@ -721,7 +715,6 @@ async def chat_stream(request: ChatRequest):
                         accumulated_answer += char
                         yield f"event: token\n"
                         yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                        await asyncio.sleep(0.01)
 
                 else:
                     # Continue with IT Agent processing
@@ -747,8 +740,7 @@ async def chat_stream(request: ChatRequest):
                             accumulated_answer += char
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                            await asyncio.sleep(0.01)
-
+    
                     elif specialist_intent == "policy_query":
                         # RAG retrieval for IT policies
                         if category not in ["IT", "Compliance"]:
@@ -765,8 +757,7 @@ async def chat_stream(request: ChatRequest):
                         for char in prefix:
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                            await asyncio.sleep(0.01)
-
+    
                         # Stream answer tokens
                         async for token in policy_tools.generate_answer_with_citations_stream(request.message, chunks):
                             accumulated_answer += token
@@ -812,8 +803,7 @@ RULES:
                         for char in prefix:
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                            await asyncio.sleep(0.01)
-
+    
                         # Stream troubleshooting answer
                         async for chunk in (prompt | policy_tools.llm).astream({"question": request.message}):
                             if hasattr(chunk, 'content') and chunk.content:
@@ -833,8 +823,7 @@ RULES:
                             accumulated_answer += char
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                            await asyncio.sleep(0.01)
-
+    
                     else:  # out_of_scope
                         response_text = (
                             "[IT Support] I specialize in IT Security and Compliance policies (device security, "
@@ -848,8 +837,7 @@ RULES:
                             accumulated_answer += char
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-                            await asyncio.sleep(0.01)
-
+    
             # Save AI response to session
             session_manager.add_message(request.session_id, {
                 "sender": "ai",

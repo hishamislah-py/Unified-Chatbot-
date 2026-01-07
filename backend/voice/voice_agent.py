@@ -73,11 +73,16 @@ Keep your acknowledgments brief as responses come from the chat API.""",
     chat_llm.set_agent_change_callback(on_agent_change)
 
     # Create session with Groq STT, Chat API LLM (RAG + Multi-Agent), and Edge TTS
+    # Optimized VAD settings for faster response
     session = AgentSession(
         stt=STT(model="whisper-large-v3"),
         llm=chat_llm,  # Uses Chat API with RAG + Multi-Agent
         tts=tts,  # Free Microsoft Edge TTS with voice switching
-        vad=VAD.load(),
+        vad=VAD.load(
+            min_silence_duration=0.25,  # 250ms (was 550ms) - faster end detection
+            min_speech_duration=0.05,   # 50ms - minimum speech to register
+            prefix_padding_duration=0.3, # 300ms (was 500ms) - less audio prefix
+        ),
     )
     logger.info("Using Chat API LLM (RAG + Multi-Agent)")
     logger.info(f"Agent voices: Personal={AGENT_VOICES['personal']}, HR={AGENT_VOICES['hr']}, IT={AGENT_VOICES['it']}")

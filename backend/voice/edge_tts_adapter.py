@@ -5,7 +5,6 @@ Free TTS using Microsoft Edge's speech synthesis - no API key required
 from __future__ import annotations
 
 import asyncio
-import io
 from dataclasses import dataclass
 
 import edge_tts
@@ -56,7 +55,7 @@ class EdgeTTS(tts.TTS):
                         Run `edge-tts --list-voices` to see all available voices.
         """
         super().__init__(
-            capabilities=tts.TTSCapabilities(streaming=False),
+            capabilities=tts.TTSCapabilities(streaming=False),  # Chunked mode (Edge TTS doesn't support true streaming)
             sample_rate=SAMPLE_RATE,
             num_channels=NUM_CHANNELS,
         )
@@ -104,28 +103,31 @@ class EdgeChunkedStream(tts.ChunkedStream):
                 self._tts._opts.voice
             )
 
-            # Collect audio data
-            audio_data = io.BytesIO()
+            # Initialize emitter before first chunk (for streaming)
+            initialized = False
+            has_audio = False
 
+            # Stream audio chunks as they arrive (low latency)
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
-                    audio_data.write(chunk["data"])
+                    # Initialize on first audio chunk
+                    if not initialized:
+                        output_emitter.initialize(
+                            request_id=utils.shortuuid(),
+                            sample_rate=SAMPLE_RATE,
+                            num_channels=NUM_CHANNELS,
+                            mime_type="audio/mpeg",  # Edge TTS outputs MP3
+                        )
+                        initialized = True
 
-            audio_bytes = audio_data.getvalue()
+                    # Push chunk immediately (streaming)
+                    output_emitter.push(chunk["data"])
+                    has_audio = True
 
-            if not audio_bytes:
+            if not has_audio:
                 raise APIConnectionError("No audio data received from Edge TTS")
 
-            # Initialize the emitter with MP3 format
-            output_emitter.initialize(
-                request_id=utils.shortuuid(),
-                sample_rate=SAMPLE_RATE,
-                num_channels=NUM_CHANNELS,
-                mime_type="audio/mpeg",  # Edge TTS outputs MP3
-            )
-
-            # Push all audio data
-            output_emitter.push(audio_bytes)
+            # Flush remaining data
             output_emitter.flush()
 
         except asyncio.TimeoutError:
