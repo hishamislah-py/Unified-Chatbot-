@@ -75,7 +75,7 @@ LangGraph Multi-Agent System
 
 ```bash
 cd backend
-python api/server.py  |   uvicorn api.server:app --reload --host 0.0.0.0 --port 8000
+python api/server.py  |     uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Expected output:

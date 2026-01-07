@@ -45,7 +45,21 @@ interface Message {
   isStreaming?: boolean;  // NEW: Track if message is currently streaming
 }
 
-export default function AIChatCard({ className }: { className?: string }) {
+interface AIChatCardProps {
+  className?: string;
+  sessionId?: string;
+  onSessionReady?: (sessionId: string) => void;
+  externalMessage?: string | null;  // Message from voice input
+  onExternalMessageProcessed?: () => void;  // Callback when external message is processed
+}
+
+export default function AIChatCard({
+  className,
+  sessionId: externalSessionId,
+  onSessionReady,
+  externalMessage,
+  onExternalMessageProcessed
+}: AIChatCardProps) {
   const [activeAgent, setActiveAgent] = useState<AgentType>("personal");
   const [messages, setMessages] = useState<Record<AgentType, Message[]>>({
     personal: [],
@@ -55,18 +69,35 @@ export default function AIChatCard({ className }: { className?: string }) {
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
-  const [sessionId, setSessionId] = useState<string>("");
+  const [sessionId, setSessionId] = useState<string>(externalSessionId || "");
   const [error, setError] = useState<string>("");
   const [isInitializing, setIsInitializing] = useState(true);
 
   useEffect(() => {
     setIsMounted(true);
 
-    // Initialize session on mount
+    // Initialize session on mount (only if no external session provided)
     const initSession = async () => {
       try {
+        // Use external session if provided
+        if (externalSessionId) {
+          setSessionId(externalSessionId);
+          setMessages({
+            personal: [{ sender: "ai", text: agents[0].greeting }],
+            hr: [],
+            it: [],
+          });
+          setIsInitializing(false);
+          return;
+        }
+
         const session = await chatAPI.createSession();
         setSessionId(session.session_id);
+
+        // Notify parent of session ID
+        if (onSessionReady) {
+          onSessionReady(session.session_id);
+        }
 
         // Add greeting to Personal Assistant only
         setMessages({
@@ -84,7 +115,17 @@ export default function AIChatCard({ className }: { className?: string }) {
     };
 
     initSession();
-  }, []);
+  }, [externalSessionId, onSessionReady]);
+
+  // Handle external messages (from voice input)
+  useEffect(() => {
+    if (externalMessage && !isTyping && sessionId) {
+      sendMessage(externalMessage);
+      if (onExternalMessageProcessed) {
+        onExternalMessageProcessed();
+      }
+    }
+  }, [externalMessage]);
 
   // Generate consistent particle configurations
   const particles = useMemo(() => {
@@ -101,10 +142,11 @@ export default function AIChatCard({ className }: { className?: string }) {
   const currentAgent = agents.find((a) => a.id === activeAgent)!;
   const currentMessages = messages[activeAgent];
 
-  const handleSend = async () => {
-    if (!input.trim() || !sessionId || isTyping) return;
+  // Core send message function (used by both typing and voice)
+  const sendMessage = async (messageText: string) => {
+    if (!messageText.trim() || !sessionId || isTyping) return;
 
-    const userMessage = input.trim();
+    const userMessage = messageText.trim();
 
     // Add user message immediately
     setMessages((prev) => ({
@@ -201,6 +243,12 @@ export default function AIChatCard({ className }: { className?: string }) {
         setIsTyping(false);
       }
     );
+  };
+
+  // Handler for typed input
+  const handleSend = () => {
+    if (!input.trim()) return;
+    sendMessage(input);
   };
 
   return (

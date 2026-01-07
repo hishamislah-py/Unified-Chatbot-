@@ -1,13 +1,154 @@
-import { useState } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Mic, X, MicOff } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  LiveKitRoom,
+  useVoiceAssistant,
+  RoomAudioRenderer,
+  useConnectionState,
+} from "@livekit/components-react";
+import { ConnectionState } from "livekit-client";
 
-export default function VoiceAssistant({ className }: { className?: string }) {
-  const [isListening, setIsListening] = useState(true);
-  const [userName] = useState("Armando");
+const API_BASE_URL = "http://localhost:8000/api";
 
-  return (
+type VoiceState = "idle" | "connecting" | "connected" | "listening" | "speaking" | "error";
+
+interface VoiceAssistantProps {
+  className?: string;
+  sessionId?: string;
+  onTranscriptionComplete?: (text: string) => void;
+}
+
+// Inner component for LiveKit hooks (must be inside LiveKitRoom)
+function LiveKitVoiceHandler({
+  onStateChange,
+  onTranscription,
+  onUserTranscriptionComplete,
+}: {
+  onStateChange: (state: VoiceState) => void;
+  onTranscription: (userText: string, agentText: string) => void;
+  onUserTranscriptionComplete?: (text: string) => void;
+}) {
+  const voiceAssistant = useVoiceAssistant();
+  const connectionState = useConnectionState();
+  const [lastTranscriptionCount, setLastTranscriptionCount] = useState(0);
+
+  useEffect(() => {
+    if (connectionState === ConnectionState.Connecting) {
+      onStateChange("connecting");
+    } else if (connectionState === ConnectionState.Connected) {
+      if (voiceAssistant.state.agentState === "speaking") {
+        onStateChange("speaking");
+      } else if (voiceAssistant.state.agentState === "listening") {
+        onStateChange("listening");
+      } else {
+        onStateChange("connected");
+      }
+    } else if (connectionState === ConnectionState.Disconnected) {
+      onStateChange("idle");
+    }
+  }, [connectionState, voiceAssistant.state.agentState, onStateChange]);
+
+  // Track transcriptions for display
+  useEffect(() => {
+    const userText = voiceAssistant.userTranscriptions?.[voiceAssistant.userTranscriptions.length - 1]?.text || "";
+    const agentText = voiceAssistant.agentTranscriptions?.[voiceAssistant.agentTranscriptions.length - 1]?.text || "";
+    onTranscription(userText, agentText);
+  }, [voiceAssistant.userTranscriptions, voiceAssistant.agentTranscriptions, onTranscription]);
+
+  // Detect when a new complete user transcription is available and send to chat
+  useEffect(() => {
+    const transcriptions = voiceAssistant.userTranscriptions || [];
+    if (transcriptions.length > lastTranscriptionCount) {
+      const latestTranscription = transcriptions[transcriptions.length - 1];
+      if (latestTranscription?.text && onUserTranscriptionComplete) {
+        onUserTranscriptionComplete(latestTranscription.text);
+      }
+      setLastTranscriptionCount(transcriptions.length);
+    }
+  }, [voiceAssistant.userTranscriptions, lastTranscriptionCount, onUserTranscriptionComplete]);
+
+  return <RoomAudioRenderer />;
+}
+
+export default function VoiceAssistant({ className, sessionId, onTranscriptionComplete }: VoiceAssistantProps) {
+  const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [connectionInfo, setConnectionInfo] = useState<{
+    token: string;
+    livekitUrl: string;
+  } | null>(null);
+  const [userName] = useState("User");
+  const [userText, setUserText] = useState("");
+  const [agentText, setAgentText] = useState("");
+  const [error, setError] = useState("");
+
+  const isConnected = connectionInfo !== null;
+  const isListening = voiceState === "listening" || voiceState === "speaking" || voiceState === "connected";
+
+  // Handle transcription updates
+  const handleTranscription = useCallback((user: string, agent: string) => {
+    if (user) setUserText(user);
+    if (agent) setAgentText(agent);
+  }, []);
+
+  // Connect to LiveKit
+  const connectVoice = useCallback(async () => {
+    setVoiceState("connecting");
+    setError("");
+    setUserText("");
+    setAgentText("");
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/livekit/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+
+      if (!response.ok) throw new Error("Failed to connect");
+
+      const data = await response.json();
+      setConnectionInfo({
+        token: data.token,
+        livekitUrl: data.livekit_url,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Connection failed");
+      setVoiceState("error");
+    }
+  }, [sessionId]);
+
+  // Disconnect
+  const disconnectVoice = useCallback(() => {
+    setConnectionInfo(null);
+    setVoiceState("idle");
+    setUserText("");
+    setAgentText("");
+  }, []);
+
+  // Toggle connection
+  const handleMicClick = () => {
+    if (isConnected) {
+      disconnectVoice();
+    } else {
+      connectVoice();
+    }
+  };
+
+  // Status text
+  const getStatusText = () => {
+    switch (voiceState) {
+      case "connecting": return "Connecting...";
+      case "connected": return "Connected - speak now";
+      case "listening": return `I'm listening, ${userName}...`;
+      case "speaking": return "Speaking...";
+      case "error": return error || "Connection error";
+      default: return "Click mic to start";
+    }
+  };
+
+  const content = (
     <div
       className={cn(
         "relative w-full h-full flex flex-col items-center justify-center px-8 py-12",
@@ -70,7 +211,6 @@ export default function VoiceAssistant({ className }: { className?: string }) {
 
           {/* Core orb */}
           <div className="absolute inset-16 rounded-full bg-gradient-to-br from-blue-400 via-cyan-300 to-blue-500 shadow-2xl">
-            {/* Shine effect */}
             <motion.div
               className="absolute inset-0 rounded-full bg-gradient-to-tr from-white/40 via-white/10 to-transparent"
               animate={{
@@ -82,8 +222,6 @@ export default function VoiceAssistant({ className }: { className?: string }) {
                 ease: "linear",
               }}
             />
-
-            {/* Inner highlight */}
             <div className="absolute top-6 left-6 w-8 h-8 rounded-full bg-white/50 blur-md" />
           </div>
 
@@ -92,59 +230,62 @@ export default function VoiceAssistant({ className }: { className?: string }) {
             <>
               <motion.div
                 className="absolute inset-0 rounded-full border-2 border-cyan-300/30"
-                animate={{
-                  scale: [1, 1.5],
-                  opacity: [0.5, 0],
-                }}
-                transition={{
-                  duration: 2,
-                  repeat: Infinity,
-                  ease: "easeOut",
-                }}
+                animate={{ scale: [1, 1.5], opacity: [0.5, 0] }}
+                transition={{ duration: 2, repeat: Infinity, ease: "easeOut" }}
               />
               <motion.div
                 className="absolute inset-0 rounded-full border-2 border-blue-300/30"
-                animate={{
-                  scale: [1, 1.5],
-                  opacity: [0.5, 0],
-                }}
-                transition={{
-                  duration: 2,
-                  repeat: Infinity,
-                  ease: "easeOut",
-                  delay: 1,
-                }}
+                animate={{ scale: [1, 1.5], opacity: [0.5, 0] }}
+                transition={{ duration: 2, repeat: Infinity, ease: "easeOut", delay: 1 }}
               />
             </>
           )}
         </motion.div>
       </div>
 
-      {/* Text */}
-      <div className="text-center space-y-2 mb-16">
+      {/* Status Text */}
+      <div className="text-center space-y-2 mb-8">
         <motion.h2
           className="text-2xl font-semibold text-white"
-          animate={{
-            opacity: isListening ? [1, 0.8, 1] : 1,
-          }}
-          transition={{
-            duration: 2,
-            repeat: isListening ? Infinity : 0,
-            ease: "easeInOut",
-          }}
+          animate={{ opacity: isListening ? [1, 0.8, 1] : 1 }}
+          transition={{ duration: 2, repeat: isListening ? Infinity : 0, ease: "easeInOut" }}
         >
-          {isListening ? `I'm listening, ${userName}...` : "Click to start listening"}
+          {getStatusText()}
         </motion.h2>
         <p className="text-lg text-white/70">
-          {isListening ? "What's on your mind?" : ""}
+          {voiceState === "idle" ? "What's on your mind?" : ""}
         </p>
       </div>
 
+      {/* Transcriptions */}
+      {(userText || agentText) && (
+        <div className="text-center space-y-2 mb-8 max-w-md">
+          {userText && (
+            <motion.p
+              className="text-sm text-white/60"
+              initial={{ opacity: 0, y: 5 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              You: "{userText}"
+            </motion.p>
+          )}
+          {agentText && (
+            <motion.p
+              className="text-sm text-cyan-300"
+              initial={{ opacity: 0, y: 5 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              Assistant: "{agentText}"
+            </motion.p>
+          )}
+        </div>
+      )}
+
       {/* Control Buttons */}
       <div className="flex items-center gap-6">
-        {/* Close Button */}
+        {/* Close/Disconnect Button */}
         <motion.button
-          onClick={() => setIsListening(false)}
+          onClick={disconnectVoice}
           className="w-14 h-14 rounded-full bg-white/10 backdrop-blur-md border border-white/20 flex items-center justify-center hover:bg-white/20 transition-colors"
           whileHover={{ scale: 1.1 }}
           whileTap={{ scale: 0.95 }}
@@ -154,30 +295,30 @@ export default function VoiceAssistant({ className }: { className?: string }) {
 
         {/* Microphone Button */}
         <motion.button
-          onClick={() => setIsListening(!isListening)}
+          onClick={handleMicClick}
+          disabled={voiceState === "connecting"}
           className={cn(
             "w-14 h-14 rounded-full backdrop-blur-md border flex items-center justify-center transition-all",
-            isListening
+            isConnected
               ? "bg-white/10 border-white/20 hover:bg-white/20"
               : "bg-red-500/20 border-red-500/30 hover:bg-red-500/30"
           )}
           whileHover={{ scale: 1.1 }}
           whileTap={{ scale: 0.95 }}
           animate={{
-            boxShadow: isListening
-              ? [
-                  "0 0 0 0 rgba(96, 165, 250, 0.4)",
-                  "0 0 0 10px rgba(96, 165, 250, 0)",
-                ]
+            boxShadow: isConnected
+              ? ["0 0 0 0 rgba(96, 165, 250, 0.4)", "0 0 0 10px rgba(96, 165, 250, 0)"]
               : "0 0 0 0 rgba(239, 68, 68, 0)",
           }}
-          transition={{
-            duration: 1.5,
-            repeat: isListening ? Infinity : 0,
-            ease: "easeOut",
-          }}
+          transition={{ duration: 1.5, repeat: isConnected ? Infinity : 0, ease: "easeOut" }}
         >
-          {isListening ? (
+          {voiceState === "connecting" ? (
+            <motion.div
+              className="w-6 h-6 border-2 border-white border-t-transparent rounded-full"
+              animate={{ rotate: 360 }}
+              transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+            />
+          ) : isConnected ? (
             <Mic className="w-6 h-6 text-white" />
           ) : (
             <MicOff className="w-6 h-6 text-red-300" />
@@ -192,20 +333,40 @@ export default function VoiceAssistant({ className }: { className?: string }) {
             <motion.div
               key={i}
               className="w-2 h-2 rounded-full bg-cyan-400"
-              animate={{
-                scale: [1, 1.5, 1],
-                opacity: [0.5, 1, 0.5],
-              }}
-              transition={{
-                duration: 1.5,
-                repeat: Infinity,
-                delay: i * 0.2,
-                ease: "easeInOut",
-              }}
+              animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
+              transition={{ duration: 1.5, repeat: Infinity, delay: i * 0.2, ease: "easeInOut" }}
             />
           ))}
         </div>
       )}
+
+      {/* Error message */}
+      {error && (
+        <p className="mt-4 text-red-400 text-sm">{error}</p>
+      )}
     </div>
   );
+
+  // Wrap with LiveKitRoom when connected
+  if (isConnected) {
+    return (
+      <LiveKitRoom
+        token={connectionInfo.token}
+        serverUrl={connectionInfo.livekitUrl}
+        connect={true}
+        audio={true}
+        video={false}
+        onDisconnected={disconnectVoice}
+      >
+        <LiveKitVoiceHandler
+          onStateChange={setVoiceState}
+          onTranscription={handleTranscription}
+          onUserTranscriptionComplete={onTranscriptionComplete}
+        />
+        {content}
+      </LiveKitRoom>
+    );
+  }
+
+  return content;
 }

@@ -1,9 +1,14 @@
 import sys
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
+
+# Load environment variables
+env_path = Path(__file__).parent.parent / "env" / ".env"
+load_dotenv(env_path)
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +16,8 @@ from fastapi.responses import StreamingResponse
 import uvicorn
 import json
 import asyncio
+import uuid
+import os
 
 from api.models import ChatRequest, ChatResponse, SessionInfo, HealthCheckResponse, Source
 from api.session_manager import SessionManager
@@ -138,6 +145,71 @@ async def health_check():
         rag_initialized=rag_system is not None,
         graph_initialized=agent_graph is not None
     )
+
+
+# =============================================================================
+# LIVEKIT VOICE ENDPOINTS
+# =============================================================================
+
+@app.post("/api/livekit/token", tags=["Voice"])
+async def generate_livekit_token(session_id: str = None):
+    """
+    Generate a LiveKit room token for voice connection
+
+    Args:
+        session_id: Optional session ID to associate with the voice room
+
+    Returns:
+        token: JWT token for LiveKit room access
+        room_name: Name of the room to join
+        livekit_url: URL of the LiveKit server
+    """
+    try:
+        from livekit import api
+
+        # Get LiveKit credentials from environment
+        livekit_url = os.getenv("LIVEKIT_URL", "ws://localhost:7880")
+        api_key = os.getenv("LIVEKIT_API_KEY", "devkey")
+        api_secret = os.getenv("LIVEKIT_API_SECRET", "devsecret")
+
+        # Create unique room and participant names
+        room_name = f"voice-room-{session_id or str(uuid.uuid4())[:8]}"
+        participant_name = f"user-{str(uuid.uuid4())[:8]}"
+
+        # Create access token
+        token = api.AccessToken(api_key=api_key, api_secret=api_secret)
+        token.with_identity(participant_name)
+        token.with_name(participant_name)
+        token.with_grants(api.VideoGrants(
+            room_join=True,
+            room=room_name,
+            can_publish=True,
+            can_subscribe=True,
+        ))
+
+        return {
+            "token": token.to_jwt(),
+            "room_name": room_name,
+            "participant_name": participant_name,
+            "livekit_url": livekit_url,
+        }
+
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="LiveKit SDK not installed. Run: pip install livekit"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate LiveKit token: {str(e)}"
+        )
+
+
+@app.options("/api/livekit/token", tags=["Voice"])
+async def options_livekit_token():
+    """Handle CORS preflight for LiveKit token endpoint"""
+    return {"message": "OK"}
 
 
 @app.options("/api/sessions", tags=["Sessions"])
