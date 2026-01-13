@@ -18,6 +18,7 @@ from .specialist_agents import (
     it_out_of_scope_node,
     it_troubleshooting_node,
     it_jira_offer_node,
+    it_jira_create_node,
 )
 
 
@@ -55,6 +56,12 @@ class MultiAgentState(TypedDict):
     # Session management
     session_id: str               # Session identifier
     workflow_path: list           # Track which nodes were executed
+
+    # JIRA ticket creation
+    original_issue: str           # Store the original IT issue for ticket creation
+    jira_ticket_id: str           # Created ticket ID (if any)
+    jira_ticket_url: str          # Created ticket URL (if any)
+    awaiting_jira_confirmation: bool  # Whether we're waiting for user to confirm ticket creation
 
 
 # =============================================================================
@@ -98,16 +105,19 @@ def route_from_hr_validation(state: MultiAgentState) -> Literal["hr_rag_retrieva
 
 def route_from_it_entry(state: MultiAgentState) -> Literal[
     "it_clarification", "it_rag_retrieval", "it_troubleshooting",
-    "it_jira_offer", "it_out_of_scope"
+    "it_jira_offer", "it_jira_create", "it_out_of_scope"
 ]:
     """
     Router 4: Route within IT agent based on intent
-    Supports: policy_query, troubleshooting, follow_up_issue, ambiguous, out_of_scope
+    Supports: policy_query, troubleshooting, follow_up_issue,
+              jira_confirmation, jira_create_direct, ambiguous, out_of_scope
     """
     intent = state.get('specialist_intent', '')
+    awaiting_confirmation = state.get('awaiting_jira_confirmation', False)
 
     # Debug logging
     print(f"[IT Router] Routing with intent: '{intent}'")
+    print(f"[IT Router] Awaiting JIRA confirmation: {awaiting_confirmation}")
 
     if intent == "ambiguous":
         print("[IT Router] -> it_clarification")
@@ -121,6 +131,19 @@ def route_from_it_entry(state: MultiAgentState) -> Literal[
     elif intent == "follow_up_issue":
         print("[IT Router] -> it_jira_offer")
         return "it_jira_offer"
+    elif intent == "jira_confirmation" and awaiting_confirmation:
+        # User confirmed ticket creation after offer
+        print("[IT Router] -> it_jira_create (confirmation)")
+        return "it_jira_create"
+    elif intent == "jira_create_direct":
+        # User directly requested JIRA ticket creation
+        print("[IT Router] -> it_jira_create (direct)")
+        return "it_jira_create"
+    elif intent == "jira_confirmation" and not awaiting_confirmation:
+        # User said "yes" but we weren't expecting confirmation
+        # Treat as out of scope or clarification needed
+        print("[IT Router] -> it_out_of_scope (unexpected confirmation)")
+        return "it_out_of_scope"
     else:  # out_of_scope
         print(f"[IT Router] -> it_out_of_scope (unrecognized intent: '{intent}')")
         return "it_out_of_scope"
@@ -185,6 +208,7 @@ def create_multi_agent_graph():
     workflow.add_node("it_out_of_scope", it_out_of_scope_node)
     workflow.add_node("it_troubleshooting", it_troubleshooting_node)
     workflow.add_node("it_jira_offer", it_jira_offer_node)
+    workflow.add_node("it_jira_create", it_jira_create_node)
 
     # ==========================================================================
     # SET ENTRY POINT
@@ -246,7 +270,7 @@ def create_multi_agent_graph():
     # ADD EDGES - IT AGENT
     # ==========================================================================
 
-    # IT entry routes to clarification, RAG, troubleshooting, JIRA offer, or out-of-scope
+    # IT entry routes to clarification, RAG, troubleshooting, JIRA offer/create, or out-of-scope
     workflow.add_conditional_edges(
         "it_entry",
         route_from_it_entry,
@@ -255,6 +279,7 @@ def create_multi_agent_graph():
             "it_rag_retrieval": "it_rag_retrieval",
             "it_troubleshooting": "it_troubleshooting",
             "it_jira_offer": "it_jira_offer",
+            "it_jira_create": "it_jira_create",
             "it_out_of_scope": "it_out_of_scope"
         }
     )
@@ -275,11 +300,12 @@ def create_multi_agent_graph():
         }
     )
 
-    # Clarification, out-of-scope, troubleshooting, and JIRA offer go directly to END
+    # Clarification, out-of-scope, troubleshooting, JIRA offer, and JIRA create go directly to END
     workflow.add_edge("it_clarification", END)
     workflow.add_edge("it_out_of_scope", END)
     workflow.add_edge("it_troubleshooting", END)
     workflow.add_edge("it_jira_offer", END)
+    workflow.add_edge("it_jira_create", END)
 
     # ==========================================================================
     # COMPILE WITH MEMORY

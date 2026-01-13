@@ -26,7 +26,8 @@ from agents.specialist_agents import (
     hr_agent_entry_node, hr_clarification_node, hr_rag_retrieval_node,
     hr_answer_generation_node, hr_answer_generation_node_stream, hr_validation_node, hr_out_of_scope_node,
     it_agent_entry_node, it_clarification_node, it_rag_retrieval_node,
-    it_answer_generation_node, it_answer_generation_node_stream, it_validation_node, it_out_of_scope_node
+    it_answer_generation_node, it_answer_generation_node_stream, it_validation_node, it_out_of_scope_node,
+    it_troubleshooting_node, it_jira_offer_node, it_jira_create_node
 )
 from agents.personal_assistant import PersonalAssistantTools
 from rag_node import SimpleRAG
@@ -300,7 +301,8 @@ async def chat(request: ChatRequest):
         session_manager.sessions[request.session_id] = {
             "created_at": datetime.now().isoformat(),
             "messages": [],
-            "current_agent": request.agent
+            "current_agent": request.agent,
+            "agent_state": {"original_issue": "", "awaiting_jira_confirmation": False}
         }
         session = session_manager.get_session(request.session_id)
         print(f"[INFO] Auto-created session: {request.session_id}")
@@ -316,6 +318,9 @@ async def chat(request: ChatRequest):
         # Determine which agent to use based on current context
         # If request.agent is not 'personal', use that agent
         entry_agent = request.agent
+
+        # Get previous state from session if available (for JIRA confirmation flow)
+        previous_state = session.get("agent_state", {})
 
         # Prepare initial state for LangGraph
         initial_state = {
@@ -334,7 +339,12 @@ async def chat(request: ChatRequest):
             "retry_count": 0,
             "validation_reason": "",
             "session_id": request.session_id,
-            "workflow_path": []
+            "workflow_path": [],
+            # JIRA ticket creation fields - preserve from previous state
+            "original_issue": previous_state.get("original_issue", ""),
+            "jira_ticket_id": "",
+            "jira_ticket_url": "",
+            "awaiting_jira_confirmation": previous_state.get("awaiting_jira_confirmation", False)
         }
 
         # Execute multi-agent graph with dynamic entry point
@@ -387,6 +397,9 @@ async def chat(request: ChatRequest):
             workflow.add_node("it_answer_generation", it_answer_generation_node)
             workflow.add_node("it_validation", it_validation_node)
             workflow.add_node("it_out_of_scope", it_out_of_scope_node)
+            workflow.add_node("it_troubleshooting", it_troubleshooting_node)
+            workflow.add_node("it_jira_offer", it_jira_offer_node)
+            workflow.add_node("it_jira_create", it_jira_create_node)
 
             workflow.set_entry_point(next_node)
 
@@ -401,7 +414,13 @@ async def chat(request: ChatRequest):
                 workflow.add_edge(next_node, END)
 
             it_graph = workflow.compile()
-            final_state = it_graph.invoke(state_after_entry, config)
+
+            # Handle async node (it_jira_create_node is async)
+            if next_node == "it_jira_create":
+                # Run async node directly
+                final_state = await it_jira_create_node(state_after_entry)
+            else:
+                final_state = it_graph.invoke(state_after_entry, config)
 
         else:
             # Use personal assistant (default entry point)
@@ -428,6 +447,12 @@ async def chat(request: ChatRequest):
             request.session_id,
             final_state['current_agent']
         )
+
+        # Save agent state for JIRA flow persistence
+        session_manager.sessions[request.session_id]["agent_state"] = {
+            "original_issue": final_state.get("original_issue", ""),
+            "awaiting_jira_confirmation": final_state.get("awaiting_jira_confirmation", False)
+        }
 
         # Convert sources to Source models
         sources = [
@@ -490,7 +515,8 @@ async def chat_stream(request: ChatRequest):
         session_manager.sessions[request.session_id] = {
             "created_at": datetime.now().isoformat(),
             "messages": [],
-            "current_agent": request.agent
+            "current_agent": request.agent,
+            "agent_state": {"original_issue": "", "awaiting_jira_confirmation": False}
         }
         session = session_manager.get_session(request.session_id)
         print(f"[INFO] Auto-created session: {request.session_id}")
@@ -727,6 +753,7 @@ async def chat_stream(request: ChatRequest):
 
                     print(f"[IT Stream] Message: {request.message}")
                     print(f"[IT Stream] Classified intent: {specialist_intent}")
+                    print(f"[IT Stream] Category: {category}")
 
                     if specialist_intent == "ambiguous":
                         # Clarification needed
@@ -780,6 +807,12 @@ async def chat_stream(request: ChatRequest):
                         from langchain_core.prompts import ChatPromptTemplate
                         from langchain_core.output_parsers import StrOutputParser
 
+                        # Store original issue for potential JIRA ticket creation
+                        session_manager.sessions[request.session_id]["agent_state"] = {
+                            "original_issue": request.message,
+                            "awaiting_jira_confirmation": False
+                        }
+
                         prompt = ChatPromptTemplate.from_messages([
                             ("system", """You are an IT Support specialist. Provide helpful troubleshooting steps for the user's technical issue.
 
@@ -803,7 +836,7 @@ RULES:
                         for char in prefix:
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-    
+
                         # Stream troubleshooting answer
                         async for chunk in (prompt | policy_tools.llm).astream({"question": request.message}):
                             if hasattr(chunk, 'content') and chunk.content:
@@ -816,14 +849,87 @@ RULES:
                         response_text = (
                             "[IT Support] I'm sorry the previous solutions didn't resolve your issue. "
                             "Would you like me to create a JIRA ticket for further assistance? "
-                            "An IT support technician will review your case and get back to you."
+                            "An IT specialist will review your case and get back to you.\n\n"
+                            "Just say **'yes'** or **'create ticket'** to proceed."
                         )
 
                         for char in response_text:
                             accumulated_answer += char
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-    
+
+                        # Set flag for JIRA confirmation
+                        session_manager.sessions[request.session_id]["agent_state"] = {
+                            "original_issue": session_manager.sessions[request.session_id].get("agent_state", {}).get("original_issue", request.message),
+                            "awaiting_jira_confirmation": True
+                        }
+
+                    elif specialist_intent in ["jira_confirmation", "jira_create_direct"]:
+                        # User confirmed ticket creation or directly requested it
+                        from mcp_client import mcp_client
+
+                        # Get original issue from session state
+                        agent_state = session_manager.sessions[request.session_id].get("agent_state", {})
+                        original_issue = agent_state.get("original_issue", "")
+                        awaiting_confirmation = agent_state.get("awaiting_jira_confirmation", False)
+
+                        # For jira_confirmation, require awaiting_confirmation to be True
+                        if specialist_intent == "jira_confirmation" and not awaiting_confirmation:
+                            response_text = (
+                                "[IT Support] I'm not sure what you'd like me to confirm. "
+                                "If you're having a technical issue, please describe it and I'll help troubleshoot."
+                            )
+                            for char in response_text:
+                                accumulated_answer += char
+                                yield f"event: token\n"
+                                yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+                        else:
+                            # Create JIRA ticket
+                            if not original_issue:
+                                original_issue = request.message
+
+                            summary = f"IT Support: {original_issue[:100]}"
+                            description = f"**Issue Reported:** {original_issue}\n\n---\n*Auto-generated by IT Support Chatbot*"
+
+                            try:
+                                result = await mcp_client.create_jira_issue(
+                                    summary=summary,
+                                    description=description,
+                                    issue_type="Task",
+                                    project_key="KAN"
+                                )
+
+                                if result.success:
+                                    response_text = (
+                                        f"[IT Support] I've created a JIRA ticket for your issue.\n\n"
+                                        f"**Ticket ID:** {result.ticket_id}\n"
+                                        f"**URL:** {result.ticket_url}\n\n"
+                                        f"Our IT team will review your case and get back to you soon."
+                                    )
+                                else:
+                                    response_text = (
+                                        f"[IT Support] I apologize, but I encountered an error creating the ticket: "
+                                        f"{result.error}\n\n"
+                                        f"Please try again later or contact IT support directly."
+                                    )
+                            except Exception as e:
+                                response_text = (
+                                    f"[IT Support] I apologize, but there was an unexpected error creating your ticket. "
+                                    f"Please try again or contact IT support directly.\n\n"
+                                    f"Error: {str(e)}"
+                                )
+
+                            for char in response_text:
+                                accumulated_answer += char
+                                yield f"event: token\n"
+                                yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+
+                            # Reset JIRA confirmation flag
+                            session_manager.sessions[request.session_id]["agent_state"] = {
+                                "original_issue": "",
+                                "awaiting_jira_confirmation": False
+                            }
+
                     else:  # out_of_scope
                         response_text = (
                             "[IT Support] I specialize in IT Security and Compliance policies (device security, "

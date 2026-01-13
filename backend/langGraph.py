@@ -129,6 +129,42 @@ REASON: <brief reason>"""),
         question_lower = question.lower()
 
         # =================================================================
+        # STEP 0: JIRA ticket keywords (HIGHEST PRIORITY)
+        # =================================================================
+
+        # Direct JIRA creation request
+        direct_jira_keywords = [
+            "create jira ticket", "create a jira ticket",
+            "make a jira ticket", "open a ticket", "make a ticket",
+            "i want a ticket", "i need a ticket", "raise a ticket"
+        ]
+
+        # JIRA confirmation keywords (after offer)
+        jira_confirmation_keywords = [
+            "yes please", "yes create", "yeah", "yep", "sure",
+            "ok", "okay", "go ahead", "please create", "create it",
+            "do it", "please do", "yes do it"
+        ]
+
+        # Simple yes (needs context from state to determine if it's JIRA confirmation)
+        simple_confirmation = ["yes"]
+
+        # Check for direct JIRA creation request first
+        for keyword in direct_jira_keywords:
+            if keyword in question_lower:
+                print(f"[JIRA] Detected direct JIRA creation request: '{question}'")
+                return {"intent": "jira_create_direct", "category": "IT"}
+
+        # Check for JIRA confirmation phrases
+        for keyword in jira_confirmation_keywords:
+            if keyword in question_lower:
+                return {"intent": "jira_confirmation", "category": "IT"}
+
+        # Check for simple "yes" (will be routed based on awaiting_jira_confirmation state)
+        if question_lower.strip() in simple_confirmation:
+            return {"intent": "jira_confirmation", "category": "IT"}
+
+        # =================================================================
         # STEP 1: Keyword-based detection (fast and reliable)
         # =================================================================
 

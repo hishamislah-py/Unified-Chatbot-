@@ -198,7 +198,7 @@ docker-compose -f docker-compose.livekit.yml up -d
 This starts:
 - **LiveKit Server** on `http://localhost:7880` (HTTP API)
 - **WebSocket** on `ws://localhost:7881` (WebRTC signaling)
-- **UDP ports** 50000-50100 for RTP media
+- **UDP ports** 51000-51100 for RTP media
 
 **Default credentials (dev mode):**
 - API Key: `devkey`
