@@ -38,11 +38,17 @@ class ChatAPILLM(llm.LLM):
         self,
         *,
         api_base: str = "http://localhost:8000",
+        session_id: Optional[str] = None,
     ) -> None:
         super().__init__()
-        self._opts = ChatAPIOptions(api_base=api_base)
+        self._opts = ChatAPIOptions(api_base=api_base, session_id=session_id)
         self._http_session: Optional[aiohttp.ClientSession] = None
         self._on_agent_change_callback = None
+
+    def set_session_id(self, session_id: str) -> None:
+        """Set the session ID to use for API calls"""
+        self._opts.session_id = session_id
+        print(f"[ChatAPILLM] Session ID set to: {session_id}")
 
     def set_agent_change_callback(self, callback):
         """Set callback to be called when agent changes (for voice switching)"""
@@ -159,6 +165,7 @@ class ChatAPILLMStream(llm.LLMStream):
             "session_id": self._llm_instance._opts.session_id,
             "message": user_message,
             "agent": self._llm_instance._opts.current_agent,
+            "source": "voice",  # Identify this as a voice request for event broadcasting
         }
 
         accumulated_text = ""

@@ -18,6 +18,8 @@ interface VoiceAssistantProps {
   className?: string;
   sessionId?: string;
   onTranscriptionComplete?: (text: string) => void;
+  onVoiceActiveChange?: (active: boolean) => void;  // Called when voice connection state changes
+  onPartialTranscription?: (text: string) => void;  // Called with real-time partial transcription
 }
 
 // Inner component for LiveKit hooks (must be inside LiveKitRoom)
@@ -72,7 +74,7 @@ function LiveKitVoiceHandler({
   return <RoomAudioRenderer />;
 }
 
-export default function VoiceAssistant({ className, sessionId, onTranscriptionComplete }: VoiceAssistantProps) {
+export default function VoiceAssistant({ className, sessionId, onTranscriptionComplete, onVoiceActiveChange, onPartialTranscription }: VoiceAssistantProps) {
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
   const [connectionInfo, setConnectionInfo] = useState<{
     token: string;
@@ -86,11 +88,20 @@ export default function VoiceAssistant({ className, sessionId, onTranscriptionCo
   const isConnected = connectionInfo !== null;
   const isListening = voiceState === "listening" || voiceState === "speaking" || voiceState === "connected";
 
-  // Handle transcription updates
+  // Notify parent when voice active state changes
+  useEffect(() => {
+    onVoiceActiveChange?.(isConnected);
+  }, [isConnected, onVoiceActiveChange]);
+
+  // Handle transcription updates and emit partial transcription
   const handleTranscription = useCallback((user: string, agent: string) => {
-    if (user) setUserText(user);
+    if (user) {
+      setUserText(user);
+      // Emit partial transcription for real-time display in chat
+      onPartialTranscription?.(user);
+    }
     if (agent) setAgentText(agent);
-  }, []);
+  }, [onPartialTranscription]);
 
   // Connect to LiveKit
   const connectVoice = useCallback(async () => {

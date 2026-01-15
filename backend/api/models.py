@@ -9,13 +9,15 @@ class ChatRequest(BaseModel):
     session_id: str = Field(..., description="Session identifier")
     message: str = Field(..., description="User's message text")
     agent: Literal["personal", "hr", "it"] = Field(..., description="Currently active agent")
+    source: Literal["typed", "voice"] = Field(default="typed", description="Message source - typed or voice")
 
     class Config:
         json_schema_extra = {
             "example": {
                 "session_id": "123e4567-e89b-12d3-a456-426614174000",
                 "message": "What is the sick leave policy?",
-                "agent": "hr"
+                "agent": "hr",
+                "source": "typed"
             }
         }
 

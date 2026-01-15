@@ -48,6 +48,17 @@ async def entrypoint(ctx: JobContext):
     participant = await ctx.wait_for_participant()
     logger.info(f"Participant joined: {participant.identity}")
 
+    # Extract session_id from participant metadata (set during token generation)
+    import json
+    session_id = None
+    if participant.metadata:
+        try:
+            metadata = json.loads(participant.metadata)
+            session_id = metadata.get("session_id")
+            logger.info(f"Session ID from participant metadata: {session_id}")
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse participant metadata")
+
     # Create the voice agent with Groq services
     logger.info("Creating Voice Agent with Groq...")
 
@@ -61,8 +72,8 @@ Keep your acknowledgments brief as responses come from the chat API.""",
     # Create TTS with initial voice (Personal Assistant)
     tts = TTS_Edge(voice=AGENT_VOICES["personal"])
 
-    # Create LLM with Chat API
-    chat_llm = ChatAPILLM(api_base="http://localhost:8000")
+    # Create LLM with Chat API (pass session_id for unified session)
+    chat_llm = ChatAPILLM(api_base="http://localhost:8000", session_id=session_id)
 
     # Set up voice switching callback - when agent changes, switch TTS voice
     def on_agent_change(new_agent: str):

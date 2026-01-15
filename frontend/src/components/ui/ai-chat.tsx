@@ -42,7 +42,7 @@ interface Message {
   sender: "ai" | "user";
   text: string;
   sources?: Source[];
-  isStreaming?: boolean;  // NEW: Track if message is currently streaming
+  isStreaming?: boolean;  // Track if message is currently streaming
 }
 
 interface AIChatCardProps {
@@ -51,6 +51,10 @@ interface AIChatCardProps {
   onSessionReady?: (sessionId: string) => void;
   externalMessage?: string | null;  // Message from voice input
   onExternalMessageProcessed?: () => void;  // Callback when external message is processed
+  voiceActive?: boolean;  // Whether voice mode is active
+  partialTranscription?: string;  // Real-time partial transcription from voice
+  onAddMessage?: (callback: (msg: Message, agent?: "personal" | "hr" | "it") => void) => void;  // Expose addMessage to parent
+  onSetActiveAgent?: (callback: (agent: "personal" | "hr" | "it") => void) => void;  // Expose setActiveAgent to parent
 }
 
 export default function AIChatCard({
@@ -58,7 +62,11 @@ export default function AIChatCard({
   sessionId: externalSessionId,
   onSessionReady,
   externalMessage,
-  onExternalMessageProcessed
+  onExternalMessageProcessed,
+  voiceActive = false,
+  partialTranscription = "",
+  onAddMessage,
+  onSetActiveAgent,
 }: AIChatCardProps) {
   const [activeAgent, setActiveAgent] = useState<AgentType>("personal");
   const [messages, setMessages] = useState<Record<AgentType, Message[]>>({
@@ -72,6 +80,39 @@ export default function AIChatCard({
   const [sessionId, setSessionId] = useState<string>(externalSessionId || "");
   const [error, setError] = useState<string>("");
   const [isInitializing, setIsInitializing] = useState(true);
+
+  // Expose addMessage function to parent for voice integration
+  useEffect(() => {
+    if (onAddMessage) {
+      onAddMessage((msg: Message, agent?: AgentType) => {
+        const targetAgent = agent || activeAgent;
+        setMessages(prev => ({
+          ...prev,
+          [targetAgent]: [...prev[targetAgent], msg]
+        }));
+      });
+    }
+  }, [onAddMessage, activeAgent]);
+
+  // Expose setActiveAgent function to parent for voice integration
+  useEffect(() => {
+    if (onSetActiveAgent) {
+      onSetActiveAgent((agent: AgentType) => {
+        // Initialize agent with greeting if it's empty
+        setMessages(prev => {
+          if (prev[agent].length === 0) {
+            const greeting = agents.find(a => a.id === agent)?.greeting || "";
+            return {
+              ...prev,
+              [agent]: [{ sender: "ai", text: greeting }]
+            };
+          }
+          return prev;
+        });
+        setActiveAgent(agent);
+      });
+    }
+  }, [onSetActiveAgent]);
 
   useEffect(() => {
     setIsMounted(true);
@@ -117,15 +158,16 @@ export default function AIChatCard({
     initSession();
   }, [externalSessionId, onSessionReady]);
 
-  // Handle external messages (from voice input)
+  // Handle external messages (from voice input) - only when voice is NOT active
+  // When voice is active, messages come through the voice events SSE instead
   useEffect(() => {
-    if (externalMessage && !isTyping && sessionId) {
+    if (externalMessage && !isTyping && sessionId && !voiceActive) {
       sendMessage(externalMessage);
       if (onExternalMessageProcessed) {
         onExternalMessageProcessed();
       }
     }
-  }, [externalMessage]);
+  }, [externalMessage, voiceActive]);
 
   // Generate consistent particle configurations
   const particles = useMemo(() => {
@@ -378,6 +420,19 @@ export default function AIChatCard({
               <span className="w-2 h-2 rounded-full bg-white animate-pulse delay-400"></span>
             </motion.div>
           )}
+
+          {/* Real-time partial transcription from voice (shows as user is speaking) */}
+          {voiceActive && partialTranscription && (
+            <motion.div
+              className="px-3 py-2 rounded-xl max-w-[80%] bg-white/30 text-black self-end"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              key={partialTranscription} // Re-animate on change
+            >
+              {partialTranscription}
+              <span className="inline-block w-[2px] h-4 bg-black animate-pulse ml-0.5 align-middle">|</span>
+            </motion.div>
+          )}
         </div>
 
         {/* Input */}
@@ -390,16 +445,16 @@ export default function AIChatCard({
           <div className="flex items-center gap-2">
             <input
               className="flex-1 px-3 py-2 text-sm bg-black/50 rounded-lg border border-white/10 text-white focus:outline-none focus:ring-1 focus:ring-white/50 placeholder:text-white/40 disabled:opacity-50"
-              placeholder={isInitializing ? "Connecting..." : "Type a message..."}
+              placeholder={isInitializing ? "Connecting..." : voiceActive ? "Voice mode active..." : "Type a message..."}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-              disabled={isInitializing || isTyping}
+              disabled={isInitializing || isTyping || voiceActive}
             />
             <button
               onClick={handleSend}
               className="p-2 rounded-lg bg-white/10 hover:bg-white/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={isInitializing || isTyping || !input.trim()}
+              disabled={isInitializing || isTyping || voiceActive || !input.trim()}
             >
               <Send className="w-4 h-4 text-white" />
             </button>

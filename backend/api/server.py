@@ -67,6 +67,29 @@ session_manager = SessionManager()
 rag_system = None
 agent_graph = None
 
+# Voice event queues for broadcasting transcriptions to chat UI
+voice_event_queues: dict[str, asyncio.Queue] = {}
+
+
+# =============================================================================
+# VOICE EVENT BROADCASTING HELPER
+# =============================================================================
+
+async def broadcast_voice_event(session_id: str, event_type: str, data: dict):
+    """
+    Broadcast a voice event to subscribed clients.
+
+    Args:
+        session_id: The session ID to broadcast to
+        event_type: Event type (user_message, ai_token, ai_complete)
+        data: Event data to send
+    """
+    if session_id in voice_event_queues:
+        try:
+            voice_event_queues[session_id].put_nowait({"type": event_type, "data": data})
+        except asyncio.QueueFull:
+            pass  # Drop events if queue is full
+
 
 # =============================================================================
 # STARTUP EVENT
@@ -153,20 +176,24 @@ async def health_check():
 # =============================================================================
 
 @app.post("/api/livekit/token", tags=["Voice"])
-async def generate_livekit_token(session_id: str = None):
+async def generate_livekit_token(request: dict = None):
     """
     Generate a LiveKit room token for voice connection
 
     Args:
-        session_id: Optional session ID to associate with the voice room
+        request: JSON body with optional session_id to associate with the voice room
 
     Returns:
         token: JWT token for LiveKit room access
         room_name: Name of the room to join
         livekit_url: URL of the LiveKit server
+        session_id: The session ID associated with this voice room
     """
     try:
         from livekit import api
+
+        # Get session_id from request body
+        session_id = request.get("session_id") if request else None
 
         # Get LiveKit credentials from environment
         livekit_url = os.getenv("LIVEKIT_URL", "ws://localhost:7880")
@@ -174,10 +201,11 @@ async def generate_livekit_token(session_id: str = None):
         api_secret = os.getenv("LIVEKIT_API_SECRET", "devsecret")
 
         # Create unique room and participant names
+        # Include session_id in room name for tracking
         room_name = f"voice-room-{session_id or str(uuid.uuid4())[:8]}"
         participant_name = f"user-{str(uuid.uuid4())[:8]}"
 
-        # Create access token
+        # Create access token with session metadata
         token = api.AccessToken(api_key=api_key, api_secret=api_secret)
         token.with_identity(participant_name)
         token.with_name(participant_name)
@@ -188,11 +216,16 @@ async def generate_livekit_token(session_id: str = None):
             can_subscribe=True,
         ))
 
+        # Include session_id in token metadata so voice agent can access it
+        if session_id:
+            token.with_metadata(json.dumps({"session_id": session_id}))
+
         return {
             "token": token.to_jwt(),
             "room_name": room_name,
             "participant_name": participant_name,
             "livekit_url": livekit_url,
+            "session_id": session_id,
         }
 
     except ImportError:
@@ -210,6 +243,58 @@ async def generate_livekit_token(session_id: str = None):
 @app.options("/api/livekit/token", tags=["Voice"])
 async def options_livekit_token():
     """Handle CORS preflight for LiveKit token endpoint"""
+    return {"message": "OK"}
+
+
+@app.get("/api/voice/events/{session_id}", tags=["Voice"])
+async def voice_events_stream(session_id: str):
+    """
+    SSE endpoint for streaming voice conversation events to the chat UI.
+
+    Events:
+    - user_message: User's transcribed speech (final)
+    - ai_token: Individual AI response token
+    - ai_complete: AI response complete with metadata
+
+    Args:
+        session_id: The session ID to subscribe to
+
+    Returns:
+        StreamingResponse: SSE stream of voice events
+    """
+    queue = asyncio.Queue(maxsize=100)
+    voice_event_queues[session_id] = queue
+
+    async def event_generator():
+        try:
+            while True:
+                try:
+                    # Wait for events with timeout to detect disconnection
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"event: {event['type']}\n"
+                    yield f"data: {json.dumps(event['data'])}\n\n"
+                except asyncio.TimeoutError:
+                    # Send keepalive
+                    yield f"event: keepalive\ndata: {{}}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            voice_event_queues.pop(session_id, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@app.options("/api/voice/events/{session_id}", tags=["Voice"])
+async def options_voice_events(session_id: str):
+    """Handle CORS preflight for voice events endpoint"""
     return {"message": "OK"}
 
 
@@ -532,14 +617,23 @@ async def chat_stream(request: ChatRequest):
         """Generator that yields SSE-formatted chunks"""
         try:
             entry_agent = request.agent
+            is_voice = request.source == "voice"
 
             # Save user message to session
             session_manager.add_message(request.session_id, {
                 "sender": "user",
                 "text": request.message,
                 "agent": request.agent,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "source": request.source
             })
+
+            # Broadcast user message to chat UI if this is from voice
+            if is_voice:
+                await broadcast_voice_event(request.session_id, "user_message", {
+                    "text": request.message,
+                    "agent": request.agent
+                })
 
             # Prepare initial state
             initial_state = {
@@ -949,11 +1043,20 @@ RULES:
                 "sender": "ai",
                 "text": accumulated_answer,
                 "agent": final_agent,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "source": request.source
             })
 
             # Update current agent in session
             session_manager.update_current_agent(request.session_id, final_agent)
+
+            # Broadcast AI response completion to chat UI if this is from voice
+            if is_voice:
+                await broadcast_voice_event(request.session_id, "ai_complete", {
+                    "text": accumulated_answer,
+                    "agent": final_agent,
+                    "sources": final_sources
+                })
 
             # Send completion event with metadata
             yield f"event: complete\n"
