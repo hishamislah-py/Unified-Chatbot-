@@ -4,6 +4,7 @@ Routes voice transcriptions through the existing Chat API (RAG + Multi-Agent)
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import aiohttp
 from dataclasses import dataclass
@@ -44,6 +45,15 @@ class ChatAPILLM(llm.LLM):
         self._opts = ChatAPIOptions(api_base=api_base, session_id=session_id)
         self._http_session: Optional[aiohttp.ClientSession] = None
         self._on_agent_change_callback = None
+        self._closing = False
+
+    async def aclose(self) -> None:
+        """Clean up HTTP session"""
+        self._closing = True
+        if self._http_session is not None and not self._http_session.closed:
+            await self._http_session.close()
+            self._http_session = None
+            print("[ChatAPILLM] HTTP session closed")
 
     def set_session_id(self, session_id: str) -> None:
         """Set the session ID to use for API calls"""
@@ -60,19 +70,28 @@ class ChatAPILLM(llm.LLM):
 
     async def _ensure_session(self) -> None:
         """Ensure we have an HTTP session and chat session ID"""
-        if self._http_session is None:
-            self._http_session = aiohttp.ClientSession()
+        if self._closing:
+            return
+
+        if self._http_session is None or self._http_session.closed:
+            # Create session with reasonable timeouts
+            timeout = aiohttp.ClientTimeout(total=30, connect=10)
+            self._http_session = aiohttp.ClientSession(timeout=timeout)
 
         if self._opts.session_id is None:
-            async with self._http_session.post(
-                f"{self._opts.api_base}/api/sessions"
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    self._opts.session_id = data.get("session_id")
-                    print(f"[ChatAPILLM] Created session: {self._opts.session_id}")
-                else:
-                    raise Exception(f"Failed to create session: {resp.status}")
+            try:
+                async with self._http_session.post(
+                    f"{self._opts.api_base}/api/sessions"
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        self._opts.session_id = data.get("session_id")
+                        print(f"[ChatAPILLM] Created session: {self._opts.session_id}")
+                    else:
+                        raise Exception(f"Failed to create session: {resp.status}")
+            except aiohttp.ClientError as e:
+                print(f"[ChatAPILLM] Connection error creating session: {e}")
+                raise
 
     def chat(
         self,
@@ -114,6 +133,7 @@ class ChatAPILLMStream(llm.LLMStream):
         )
         self._llm_instance: ChatAPILLM = llm_instance
         self._chunk_id = 0
+        self._cancelled = False
 
     def _create_chunk(self, content: str) -> ChatChunk:
         """Create a ChatChunk with the given content using v1.x format"""
@@ -125,7 +145,19 @@ class ChatAPILLMStream(llm.LLMStream):
 
     async def _run(self) -> None:
         """Execute the API call and emit response chunks"""
-        await self._llm_instance._ensure_session()
+        # Check if already cancelled or closing
+        if self._cancelled or self._llm_instance._closing:
+            return
+
+        try:
+            await self._llm_instance._ensure_session()
+        except Exception as e:
+            print(f"[ChatAPILLM] Failed to ensure session: {e}")
+            if not self._cancelled:
+                self._event_ch.send_nowait(
+                    self._create_chunk("I'm having connection issues. Please try again.")
+                )
+            return
 
         # Get the last user message from chat context
         user_message = ""
@@ -156,7 +188,8 @@ class ChatAPILLMStream(llm.LLMStream):
 
         if not user_message:
             print("[ChatAPILLM] No user message found in context")
-            self._event_ch.send_nowait(self._create_chunk("I didn't catch that. Could you repeat?"))
+            if not self._cancelled:
+                self._event_ch.send_nowait(self._create_chunk("I didn't catch that. Could you repeat?"))
             return
 
         print(f"[ChatAPILLM] Sending to API ({self._llm_instance._opts.current_agent}): {user_message[:50]}...")
@@ -173,6 +206,11 @@ class ChatAPILLMStream(llm.LLMStream):
         buffer = ""
 
         try:
+            # Check if session is still valid
+            if self._llm_instance._http_session is None or self._llm_instance._http_session.closed:
+                print("[ChatAPILLM] HTTP session closed, skipping request")
+                return
+
             async with self._llm_instance._http_session.post(
                 f"{self._llm_instance._opts.api_base}/api/chat/stream",
                 json=request_data,
@@ -181,13 +219,17 @@ class ChatAPILLMStream(llm.LLMStream):
                 if resp.status != 200:
                     error_text = await resp.text()
                     print(f"[ChatAPILLM] API error: {resp.status} - {error_text}")
-                    self._event_ch.send_nowait(
-                        self._create_chunk("I'm sorry, I'm having trouble connecting.")
-                    )
+                    if not self._cancelled:
+                        self._event_ch.send_nowait(
+                            self._create_chunk("I'm sorry, I'm having trouble connecting.")
+                        )
                     return
 
                 # Parse SSE stream - use proper line-based parsing
                 async for chunk in resp.content.iter_any():
+                    if self._cancelled or self._llm_instance._closing:
+                        break
+
                     buffer += chunk.decode('utf-8')
 
                     # Process complete lines from buffer
@@ -210,7 +252,8 @@ class ChatAPILLMStream(llm.LLMStream):
                                     if current_event_type == 'token' or data.get('type') == 'token':
                                         content = data.get('content', '')
                                         accumulated_text += content
-                                        self._event_ch.send_nowait(self._create_chunk(content))
+                                        if not self._cancelled:
+                                            self._event_ch.send_nowait(self._create_chunk(content))
 
                                     elif current_event_type == 'complete':
                                         # Agent transfer happened - update for next request
@@ -234,12 +277,22 @@ class ChatAPILLMStream(llm.LLMStream):
 
                 print(f"[ChatAPILLM] Response ({self._llm_instance._opts.current_agent}): {accumulated_text[:100]}...")
 
+        except asyncio.CancelledError:
+            print("[ChatAPILLM] Request cancelled")
+            self._cancelled = True
+        except aiohttp.ClientError as e:
+            print(f"[ChatAPILLM] Connection error: {e}")
+            if not self._cancelled:
+                self._event_ch.send_nowait(
+                    self._create_chunk("I'm having connection issues. Please try again.")
+                )
         except Exception as e:
             print(f"[ChatAPILLM] Error: {e}")
-            self._event_ch.send_nowait(
-                self._create_chunk("I encountered an error.")
-            )
+            if not self._cancelled:
+                self._event_ch.send_nowait(
+                    self._create_chunk("I encountered an error.")
+                )
 
     async def aclose(self) -> None:
         """Clean up resources"""
-        pass
+        self._cancelled = True

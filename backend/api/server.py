@@ -996,8 +996,7 @@ RULES:
                                 if result.success:
                                     response_text = (
                                         f"[IT Support] I've created a JIRA ticket for your issue.\n\n"
-                                        f"**Ticket ID:** {result.ticket_id}\n"
-                                        f"**URL:** {result.ticket_url}\n\n"
+                                        f"**Ticket ID:** {result.ticket_id}\n\n"
                                         f"Our IT team will review your case and get back to you soon."
                                     )
                                 else:

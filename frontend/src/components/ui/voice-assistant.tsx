@@ -27,14 +27,17 @@ function LiveKitVoiceHandler({
   onStateChange,
   onTranscription,
   onUserTranscriptionComplete,
+  onInterimTranscription,
 }: {
   onStateChange: (state: VoiceState) => void;
   onTranscription: (userText: string, agentText: string) => void;
   onUserTranscriptionComplete?: (text: string) => void;
+  onInterimTranscription?: (text: string) => void;
 }) {
   const voiceAssistant = useVoiceAssistant();
   const connectionState = useConnectionState();
   const [lastTranscriptionCount, setLastTranscriptionCount] = useState(0);
+  const [lastInterimText, setLastInterimText] = useState("");
 
   useEffect(() => {
     if (connectionState === ConnectionState.Connecting) {
@@ -52,12 +55,22 @@ function LiveKitVoiceHandler({
     }
   }, [connectionState, voiceAssistant.state.agentState, onStateChange]);
 
-  // Track transcriptions for display
+  // Extract latest transcription text for dependency tracking
+  const latestUserText = voiceAssistant.userTranscriptions?.[voiceAssistant.userTranscriptions?.length - 1]?.text || "";
+  const latestAgentText = voiceAssistant.agentTranscriptions?.[voiceAssistant.agentTranscriptions?.length - 1]?.text || "";
+
+  // Track transcriptions for display - use actual text as dependency for real-time updates
   useEffect(() => {
-    const userText = voiceAssistant.userTranscriptions?.[voiceAssistant.userTranscriptions.length - 1]?.text || "";
-    const agentText = voiceAssistant.agentTranscriptions?.[voiceAssistant.agentTranscriptions.length - 1]?.text || "";
-    onTranscription(userText, agentText);
-  }, [voiceAssistant.userTranscriptions, voiceAssistant.agentTranscriptions, onTranscription]);
+    onTranscription(latestUserText, latestAgentText);
+  }, [latestUserText, latestAgentText, onTranscription]);
+
+  // Emit interim transcription whenever user text changes (real-time streaming)
+  useEffect(() => {
+    if (latestUserText && latestUserText !== lastInterimText) {
+      setLastInterimText(latestUserText);
+      onInterimTranscription?.(latestUserText);
+    }
+  }, [latestUserText, lastInterimText, onInterimTranscription]);
 
   // Detect when a new complete user transcription is available and send to chat
   useEffect(() => {
@@ -373,6 +386,7 @@ export default function VoiceAssistant({ className, sessionId, onTranscriptionCo
           onStateChange={setVoiceState}
           onTranscription={handleTranscription}
           onUserTranscriptionComplete={onTranscriptionComplete}
+          onInterimTranscription={onPartialTranscription}
         />
         {content}
       </LiveKitRoom>

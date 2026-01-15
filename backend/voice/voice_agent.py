@@ -98,6 +98,14 @@ Keep your acknowledgments brief as responses come from the chat API.""",
     logger.info("Using Chat API LLM (RAG + Multi-Agent)")
     logger.info(f"Agent voices: Personal={AGENT_VOICES['personal']}, HR={AGENT_VOICES['hr']}, IT={AGENT_VOICES['it']}")
 
+    # Register cleanup callback for when the job shuts down
+    async def cleanup():
+        logger.info("Cleaning up resources...")
+        await chat_llm.aclose()
+        logger.info("Cleanup complete")
+
+    ctx.add_shutdown_callback(cleanup)
+
     # Start the session (must await)
     await session.start(agent=agent, room=ctx.room)
 

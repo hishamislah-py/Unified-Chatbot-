@@ -134,9 +134,20 @@ REASON: <brief reason>"""),
 
         # Direct JIRA creation request
         direct_jira_keywords = [
+            # Original JIRA keywords
             "create jira ticket", "create a jira ticket",
             "make a jira ticket", "open a ticket", "make a ticket",
-            "i want a ticket", "i need a ticket", "raise a ticket"
+            "i want a ticket", "i need a ticket", "raise a ticket",
+            # Typos and variations of "jira"
+            "create gerad ticket", "create a gerad ticket",
+            "create gerard ticket", "create a gerard ticket",
+            "create jera ticket", "create a jera ticket",
+            "create gira ticket", "create a gira ticket",
+            "gerad ticket", "gerard ticket", "jera ticket", "gira ticket",
+            # Generic ticket requests
+            "create ticket", "create a ticket",
+            "create support ticket", "create a support ticket",
+            "log a ticket", "log ticket", "file a ticket",
         ]
 
         # JIRA confirmation keywords (after offer)
