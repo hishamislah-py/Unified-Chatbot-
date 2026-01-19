@@ -897,7 +897,7 @@ async def chat_stream(request: ChatRequest):
                         ]
 
                     elif specialist_intent == "troubleshooting":
-                        # Troubleshooting - use LLM knowledge (NOT RAG)
+                        # Troubleshooting - FIRST check RAG, then fall back to LLM knowledge
                         from langchain_core.prompts import ChatPromptTemplate
                         from langchain_core.output_parsers import StrOutputParser
 
@@ -907,20 +907,27 @@ async def chat_stream(request: ChatRequest):
                             "awaiting_jira_confirmation": False
                         }
 
-                        prompt = ChatPromptTemplate.from_messages([
-                            ("system", """You are an IT Support specialist. Provide helpful troubleshooting steps for the user's technical issue.
+                        # =================================================================
+                        # STEP 1: Check RAG first for relevant IT Support documents
+                        # =================================================================
+                        print(f"[IT Troubleshooting Stream] Checking RAG first for: {request.message}")
 
-RULES:
-1. Give practical solutions the user can try immediately
-2. Format your response with clear numbered steps
-3. Start with the simplest solutions first
-4. Be concise but thorough
-5. End with: "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
-"""),
-                            ("user", "{question}")
-                        ])
+                        # Force category to IT for RAG search
+                        rag_chunks = policy_tools.retrieve_policy(
+                            request.message,
+                            "IT",
+                            num_chunks=4
+                        )
 
-                        chain = prompt | policy_tools.llm | StrOutputParser()
+                        # Check if RAG returned meaningful results
+                        has_relevant_rag_results = False
+                        if rag_chunks and len(rag_chunks) > 0:
+                            for chunk in rag_chunks:
+                                if chunk.get('content') and len(chunk['content'].strip()) > 50:
+                                    has_relevant_rag_results = True
+                                    break
+
+                        print(f"[IT Troubleshooting Stream] RAG found relevant results: {has_relevant_rag_results}")
 
                         # Stream the answer
                         prefix = "[IT Support] "
@@ -931,12 +938,56 @@ RULES:
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
 
-                        # Stream troubleshooting answer
-                        async for chunk in (prompt | policy_tools.llm).astream({"question": request.message}):
-                            if hasattr(chunk, 'content') and chunk.content:
-                                accumulated_answer += chunk.content
+                        # =================================================================
+                        # STEP 2: If RAG has results, use them; otherwise use LLM knowledge
+                        # =================================================================
+                        if has_relevant_rag_results:
+                            # Use RAG results - stream answer with citations
+                            print("[IT Troubleshooting Stream] Using RAG-based answer")
+                            async for token in policy_tools.generate_answer_with_citations_stream(request.message, rag_chunks):
+                                accumulated_answer += token
                                 yield f"event: token\n"
-                                yield f"data: {json.dumps({'content': chunk.content, 'type': 'token'})}\n\n"
+                                yield f"data: {json.dumps({'content': token, 'type': 'token'})}\n\n"
+
+                            # Add JIRA offer at the end of RAG-based answers
+                            jira_offer = "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
+                            accumulated_answer += jira_offer
+                            for char in jira_offer:
+                                yield f"event: token\n"
+                                yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+
+                            # Extract sources
+                            final_sources = [
+                                {
+                                    "source": chunk['source'],
+                                    "page": chunk['page'],
+                                    "rank": chunk['rank'],
+                                    "preview": chunk['content'][:200] + "..." if len(chunk['content']) > 200 else chunk['content']
+                                }
+                                for chunk in rag_chunks
+                            ]
+                        else:
+                            # Fall back to LLM knowledge
+                            print("[IT Troubleshooting Stream] No RAG results, using LLM knowledge")
+                            prompt = ChatPromptTemplate.from_messages([
+                                ("system", """You are an IT Support specialist. Provide helpful troubleshooting steps for the user's technical issue.
+
+RULES:
+1. Give practical solutions the user can try immediately
+2. Format your response with clear numbered steps
+3. Start with the simplest solutions first
+4. Be concise but thorough
+5. End with: "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
+"""),
+                                ("user", "{question}")
+                            ])
+
+                            # Stream troubleshooting answer from LLM
+                            async for chunk in (prompt | policy_tools.llm).astream({"question": request.message}):
+                                if hasattr(chunk, 'content') and chunk.content:
+                                    accumulated_answer += chunk.content
+                                    yield f"event: token\n"
+                                    yield f"data: {json.dumps({'content': chunk.content, 'type': 'token'})}\n\n"
 
                     elif specialist_intent == "follow_up_issue":
                         # User says previous solution didn't work - offer JIRA ticket

@@ -368,7 +368,7 @@ def it_out_of_scope_node(state: "MultiAgentState") -> "MultiAgentState":
 
 def it_troubleshooting_node(state: "MultiAgentState") -> "MultiAgentState":
     """
-    IT troubleshooting - provides solutions using LLM knowledge (not RAG)
+    IT troubleshooting - FIRST checks RAG for relevant documents, then falls back to LLM knowledge
     For technical issues like 'Teams not working', 'mouse not working', etc.
     """
     from langchain_core.prompts import ChatPromptTemplate
@@ -381,8 +381,48 @@ def it_troubleshooting_node(state: "MultiAgentState") -> "MultiAgentState":
 
     tools = PolicyTools()
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are an IT Support specialist. Provide helpful troubleshooting steps for the user's technical issue.
+    # =================================================================
+    # STEP 1: Check RAG first for relevant IT Support documents
+    # =================================================================
+    print(f"[IT Troubleshooting] Checking RAG first for: {state['current_message']}")
+
+    # Force category to IT for RAG search
+    rag_chunks = tools.retrieve_policy(
+        state['current_message'],
+        "IT",
+        num_chunks=4
+    )
+
+    # Check if RAG returned meaningful results
+    has_relevant_rag_results = False
+    if rag_chunks and len(rag_chunks) > 0:
+        # Check if any chunk has substantial content (not just metadata)
+        for chunk in rag_chunks:
+            if chunk.get('content') and len(chunk['content'].strip()) > 50:
+                has_relevant_rag_results = True
+                break
+
+    print(f"[IT Troubleshooting] RAG found relevant results: {has_relevant_rag_results}")
+
+    # =================================================================
+    # STEP 2: If RAG has results, use them; otherwise use LLM knowledge
+    # =================================================================
+    if has_relevant_rag_results:
+        # Use RAG results - generate answer with citations
+        print("[IT Troubleshooting] Using RAG-based answer")
+        result = tools.generate_answer_with_citations(
+            state['current_message'],
+            rag_chunks
+        )
+        # Add JIRA offer at the end of RAG-based answers too
+        jira_offer = "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
+        state['answer'] = f"[IT Support] {result['answer']}{jira_offer}"
+        state['sources'] = result['sources']
+    else:
+        # Fall back to LLM knowledge
+        print("[IT Troubleshooting] No RAG results, using LLM knowledge")
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are an IT Support specialist. Provide helpful troubleshooting steps for the user's technical issue.
 
 RULES:
 1. Give practical solutions the user can try immediately
@@ -391,14 +431,15 @@ RULES:
 4. Be concise but thorough
 5. End with: "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
 """),
-        ("user", "{question}")
-    ])
+            ("user", "{question}")
+        ])
 
-    chain = prompt | tools.llm | StrOutputParser()
-    answer = chain.invoke({"question": state['current_message']})
+        chain = prompt | tools.llm | StrOutputParser()
+        answer = chain.invoke({"question": state['current_message']})
 
-    state['answer'] = f"[IT Support] {answer}"
-    state['sources'] = []
+        state['answer'] = f"[IT Support] {answer}"
+        state['sources'] = []
+
     state['is_valid'] = True
 
     return state

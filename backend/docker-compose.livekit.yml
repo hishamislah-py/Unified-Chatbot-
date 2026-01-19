@@ -10,7 +10,7 @@ services:
     ports:
       - "7880:7880"   # HTTP API
       - "7881:7881"   # WebSocket (for WebRTC signaling)
-      - "51000-51100:50000-50100/udp"  # RTP media ports (mapped to avoid conflicts)
+      - "40000-40100:50000-50100/udp"  # RTP media ports (using lower range to avoid Windows conflicts)
     command: --dev --bind 0.0.0.0
     restart: unless-stopped
     environment:
