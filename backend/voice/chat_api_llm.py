@@ -4,6 +4,7 @@ Routes voice transcriptions through the existing Chat API (RAG + Multi-Agent)
 """
 from __future__ import annotations
 
+import os
 import asyncio
 import json
 import aiohttp
@@ -15,11 +16,22 @@ from livekit.agents.llm import ChatChunk, ChoiceDelta
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
 
 
-# Voice configurations for each agent
-AGENT_VOICES = {
-    "personal": "en-US-AriaNeural",      # Female, friendly
-    "hr": "en-US-JennyNeural",           # Female, professional
-    "it": "en-US-GuyNeural",             # Male, technical
+# Agent configurations - voice + emotion per agent (for Chatterbox TTS)
+# Voices: Update once you know available voices from your Chatterbox server
+# Emotions: neutral, happy, sad, angry, excited, calm, professional, friendly
+AGENT_CONFIG = {
+    "personal": {
+        "voice": os.getenv("TTS_VOICE_PERSONAL", "default"),
+        "emotion": os.getenv("TTS_EMOTION_PERSONAL", "friendly"),
+    },
+    "hr": {
+        "voice": os.getenv("TTS_VOICE_HR", "default"),
+        "emotion": os.getenv("TTS_EMOTION_HR", "professional"),
+    },
+    "it": {
+        "voice": os.getenv("TTS_VOICE_IT", "default"),
+        "emotion": os.getenv("TTS_EMOTION_IT", "calm"),
+    },
 }
 
 
@@ -64,9 +76,9 @@ class ChatAPILLM(llm.LLM):
         """Set callback to be called when agent changes (for voice switching)"""
         self._on_agent_change_callback = callback
 
-    def get_current_voice(self) -> str:
-        """Get the TTS voice for the current agent"""
-        return AGENT_VOICES.get(self._opts.current_agent, "en-US-AriaNeural")
+    def get_current_config(self) -> dict:
+        """Get the TTS config (voice + emotion) for the current agent"""
+        return AGENT_CONFIG.get(self._opts.current_agent, AGENT_CONFIG["personal"])
 
     async def _ensure_session(self) -> None:
         """Ensure we have an HTTP session and chat session ID"""
@@ -263,7 +275,8 @@ class ChatAPILLMStream(llm.LLMStream):
                                             old_agent = self._llm_instance._opts.current_agent
                                             self._llm_instance._opts.current_agent = new_agent
                                             print(f"[ChatAPILLM] Agent changed: {old_agent} -> {new_agent}")
-                                            print(f"[ChatAPILLM] Voice changed to: {self._llm_instance.get_current_voice()}")
+                                            config = self._llm_instance.get_current_config()
+                                            print(f"[ChatAPILLM] Config changed to: voice={config['voice']}, emotion={config['emotion']}")
 
                                             # Call the callback if set
                                             if self._llm_instance._on_agent_change_callback:

@@ -92,6 +92,48 @@ async def broadcast_voice_event(session_id: str, event_type: str, data: dict):
 
 
 # =============================================================================
+# IT TROUBLESHOOTING FALLBACK HELPER
+# =============================================================================
+
+def get_generic_troubleshooting_steps(question: str) -> str:
+    """Provide generic troubleshooting steps when LLM is unavailable"""
+    question_lower = question.lower()
+
+    if any(kw in question_lower for kw in ['mouse', 'touchpad', 'keyboard', 'trackpad']):
+        return """Here are some basic troubleshooting steps for input device issues:
+
+1. **Check physical connection** - If using a wired device, ensure the USB cable is securely connected
+2. **Try a different USB port** - Sometimes ports can fail
+3. **Restart your computer** - This often resolves driver issues
+4. **Check device manager** - Look for any yellow warning icons
+5. **Update drivers** - Download latest drivers from manufacturer website
+
+If this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."""
+
+    elif any(kw in question_lower for kw in ['teams', 'outlook', 'email', 'office', 'word', 'excel', 'powerpoint']):
+        return """Here are some basic troubleshooting steps:
+
+1. **Restart the application** - Close and reopen the app
+2. **Clear cache** - Go to Settings > Clear cache
+3. **Sign out and sign back in** - This refreshes your session
+4. **Check for updates** - Ensure you have the latest version
+5. **Restart your computer** - Clears temporary issues
+
+If this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."""
+
+    else:
+        return """Here are some general troubleshooting steps:
+
+1. **Restart the application** - Close and reopen it
+2. **Restart your computer** - This resolves many issues
+3. **Check your internet connection** - Run a speed test
+4. **Check for updates** - Ensure software is up to date
+5. **Clear temporary files** - Free up system resources
+
+If this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."""
+
+
+# =============================================================================
 # STARTUP EVENT
 # =============================================================================
 
@@ -276,8 +318,13 @@ async def voice_events_stream(session_id: str):
                 except asyncio.TimeoutError:
                     # Send keepalive
                     yield f"event: keepalive\ndata: {{}}\n\n"
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client disconnected - exit gracefully
             pass
+        except Exception as e:
+            # Handle unexpected errors (including connection errors)
+            if "closed" not in str(e).lower():
+                print(f"[SSE] Voice events stream error: {e}")
         finally:
             voice_event_queues.pop(session_id, None)
 
@@ -615,6 +662,11 @@ async def chat_stream(request: ChatRequest):
 
     async def generate_stream():
         """Generator that yields SSE-formatted chunks"""
+        client_disconnected = False
+
+        def check_disconnected():
+            return client_disconnected
+
         try:
             entry_agent = request.agent
             is_voice = request.source == "voice"
@@ -780,12 +832,36 @@ async def chat_stream(request: ChatRequest):
                         for char in prefix:
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-    
-                        # Stream answer tokens
-                        async for token in policy_tools.generate_answer_with_citations_stream(request.message, chunks):
-                            accumulated_answer += token
-                            yield f"event: token\n"
-                            yield f"data: {json.dumps({'content': token, 'type': 'token'})}\n\n"
+
+                        # Stream answer tokens with error handling and fallback
+                        try:
+                            async for token in policy_tools.generate_answer_with_citations_stream(request.message, chunks):
+                                accumulated_answer += token
+                                yield f"event: token\n"
+                                yield f"data: {json.dumps({'content': token, 'type': 'token'})}\n\n"
+                        except Exception as hr_error:
+                            print(f"[HR Stream] LLM error: {hr_error}")
+                            # Fallback: Extract and format RAG content directly
+                            if chunks:
+                                fallback_response = "Based on our HR documentation:\n\n"
+                                accumulated_answer += fallback_response
+                                for char in fallback_response:
+                                    yield f"event: token\n"
+                                    yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+
+                                for i, chunk in enumerate(chunks[:3], 1):
+                                    content = chunk.get('content', '').strip()
+                                    if content:
+                                        step_text = f"**{i}. From {chunk.get('source', 'HR Policy')}:**\n{content}\n\n"
+                                        accumulated_answer += step_text
+                                        for char in step_text:
+                                            yield f"event: token\n"
+                                            yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+                            else:
+                                error_msg = "I'm having trouble generating a response. Please try again."
+                                accumulated_answer += error_msg
+                                yield f"event: token\n"
+                                yield f"data: {json.dumps({'content': error_msg, 'type': 'token'})}\n\n"
 
                         # Extract sources
                         final_sources = [
@@ -813,23 +889,38 @@ async def chat_stream(request: ChatRequest):
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
     
             elif entry_agent == "it":
-                # IT Agent - first check for transfer requests
-                pa_tools = PersonalAssistantTools()
-                transfer_check = pa_tools.classify_intent(request.message)
+                # IT Agent - use EXPLICIT keyword detection for transfers (not LLM-based)
+                # This prevents technical issues like "Teams not working" from being misclassified
+                message_lower = request.message.lower()
 
-                if transfer_check['intent'] == 'transfer_request':
-                    # Handle transfer from IT to another agent
-                    target = transfer_check['target_agent']
-                    if target == 'hr':
-                        final_agent = 'hr'
-                        response_text = "[IT Support] Connecting you to our HR specialist now. How can they help you today?"
-                    elif target == 'it':
-                        # Already in IT, just acknowledge
-                        response_text = "[IT Support] You're already connected to IT Support. How can I help you?"
-                    else:
-                        # Transfer to personal assistant
-                        final_agent = 'personal'
-                        response_text = "[IT Support] Transferring you back to the Personal Assistant. How can they help you today?"
+                # Explicit transfer keywords - only these trigger a transfer
+                hr_transfer_keywords = [
+                    "connect me to hr", "talk to hr", "transfer to hr",
+                    "connect to hr", "speak to hr", "hr agent"
+                ]
+                personal_transfer_keywords = [
+                    "connect me to personal", "talk to personal assistant",
+                    "transfer to personal", "go back", "transfer back",
+                    "main menu", "back to main"
+                ]
+
+                is_hr_transfer = any(kw in message_lower for kw in hr_transfer_keywords)
+                is_personal_transfer = any(kw in message_lower for kw in personal_transfer_keywords)
+
+                if is_hr_transfer:
+                    # Transfer to HR
+                    final_agent = 'hr'
+                    response_text = "[IT Support] Connecting you to our HR specialist now. How can they help you today?"
+
+                    for char in response_text:
+                        accumulated_answer += char
+                        yield f"event: token\n"
+                        yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+
+                elif is_personal_transfer:
+                    # Transfer to Personal Assistant
+                    final_agent = 'personal'
+                    response_text = "[IT Support] Transferring you back to the Personal Assistant. How can they help you today?"
 
                     for char in response_text:
                         accumulated_answer += char
@@ -837,13 +928,21 @@ async def chat_stream(request: ChatRequest):
                         yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
 
                 else:
-                    # Continue with IT Agent processing
+                    # Continue with IT Agent processing (troubleshooting, policy queries, etc.)
+                    print(f"[IT Stream] Processing message: {request.message[:100]}")
                     policy_tools = PolicyTools()
 
                     # Use IT-specific intent classification (supports troubleshooting)
-                    classification = policy_tools.classify_it_intent(request.message)
-                    specialist_intent = classification['intent']
-                    category = classification['category']
+                    print(f"[IT Stream] Starting intent classification...")
+                    try:
+                        classification = policy_tools.classify_it_intent(request.message)
+                        specialist_intent = classification['intent']
+                        category = classification['category']
+                        print(f"[IT Stream] Intent classified: {specialist_intent}, Category: {category}")
+                    except Exception as classify_error:
+                        print(f"[IT Stream] Intent classification FAILED: {classify_error}")
+                        specialist_intent = "troubleshooting"  # Default to troubleshooting
+                        category = "IT"
 
                     print(f"[IT Stream] Message: {request.message}")
                     print(f"[IT Stream] Classified intent: {specialist_intent}")
@@ -878,12 +977,36 @@ async def chat_stream(request: ChatRequest):
                         for char in prefix:
                             yield f"event: token\n"
                             yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
-    
-                        # Stream answer tokens
-                        async for token in policy_tools.generate_answer_with_citations_stream(request.message, chunks):
-                            accumulated_answer += token
-                            yield f"event: token\n"
-                            yield f"data: {json.dumps({'content': token, 'type': 'token'})}\n\n"
+
+                        # Stream answer tokens with error handling and fallback
+                        try:
+                            async for token in policy_tools.generate_answer_with_citations_stream(request.message, chunks):
+                                accumulated_answer += token
+                                yield f"event: token\n"
+                                yield f"data: {json.dumps({'content': token, 'type': 'token'})}\n\n"
+                        except Exception as it_error:
+                            print(f"[IT Stream] LLM error: {it_error}")
+                            # Fallback: Extract and format RAG content directly
+                            if chunks:
+                                fallback_response = "Based on our IT documentation:\n\n"
+                                accumulated_answer += fallback_response
+                                for char in fallback_response:
+                                    yield f"event: token\n"
+                                    yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+
+                                for i, chunk in enumerate(chunks[:3], 1):
+                                    content = chunk.get('content', '').strip()
+                                    if content:
+                                        step_text = f"**{i}. From {chunk.get('source', 'IT Policy')}:**\n{content}\n\n"
+                                        accumulated_answer += step_text
+                                        for char in step_text:
+                                            yield f"event: token\n"
+                                            yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+                            else:
+                                error_msg = "I'm having trouble generating a response. Please try again."
+                                accumulated_answer += error_msg
+                                yield f"event: token\n"
+                                yield f"data: {json.dumps({'content': error_msg, 'type': 'token'})}\n\n"
 
                         # Extract sources
                         final_sources = [
@@ -919,15 +1042,57 @@ async def chat_stream(request: ChatRequest):
                             num_chunks=4
                         )
 
-                        # Check if RAG returned meaningful results
+                        # =================================================================
+                        # STEP 2: Check SEMANTIC RELEVANCE of retrieved chunks
+                        # =================================================================
                         has_relevant_rag_results = False
-                        if rag_chunks and len(rag_chunks) > 0:
-                            for chunk in rag_chunks:
-                                if chunk.get('content') and len(chunk['content'].strip()) > 50:
-                                    has_relevant_rag_results = True
-                                    break
 
-                        print(f"[IT Troubleshooting Stream] RAG found relevant results: {has_relevant_rag_results}")
+                        if rag_chunks and len(rag_chunks) > 0:
+                            # Use semantic relevance check instead of just length check
+                            relevance_result = policy_tools.check_context_relevance(request.message, rag_chunks)
+                            print(f"[IT Troubleshooting Stream] Relevance check: {relevance_result}")
+
+                            if relevance_result['is_relevant']:
+                                has_relevant_rag_results = True
+                            else:
+                                # Also check for explicit keyword matches in source documents
+                                question_lower = request.message.lower()
+                                for chunk in rag_chunks:
+                                    source = chunk.get('source', '').lower()
+                                    # Direct source match check
+                                    if 'teams' in question_lower and 'teams' in source:
+                                        has_relevant_rag_results = True
+                                        print(f"[IT Troubleshooting Stream] Source match found: {source}")
+                                        break
+                                    elif 'url' in question_lower and 'url' in source:
+                                        has_relevant_rag_results = True
+                                        break
+                                    elif 'outlook' in question_lower and 'outlook' in source:
+                                        has_relevant_rag_results = True
+                                        break
+                                    elif 'onedrive' in question_lower and 'onedrive' in source:
+                                        has_relevant_rag_results = True
+                                        break
+                                    elif 'sharepoint' in question_lower and 'sharepoint' in source:
+                                        has_relevant_rag_results = True
+                                        break
+                                    elif ('mouse' in question_lower or 'keyboard' in question_lower or 'touchpad' in question_lower) and 'hardware' in source:
+                                        has_relevant_rag_results = True
+                                        break
+                                    elif ('camera' in question_lower or 'mic' in question_lower or 'headset' in question_lower) and ('camera' in source or 'mic' in source or 'headset' in source):
+                                        has_relevant_rag_results = True
+                                        break
+                                    elif ('freeze' in question_lower or 'freezing' in question_lower) and 'freezing' in source:
+                                        has_relevant_rag_results = True
+                                        break
+                                    elif 'screenshare' in question_lower and 'screenshare' in source:
+                                        has_relevant_rag_results = True
+                                        break
+                                    elif 'vm' in question_lower and 'vm' in source:
+                                        has_relevant_rag_results = True
+                                        break
+
+                        print(f"[IT Troubleshooting Stream] Final relevance decision: {has_relevant_rag_results}")
 
                         # Stream the answer
                         prefix = "[IT Support] "
@@ -944,12 +1109,35 @@ async def chat_stream(request: ChatRequest):
                         if has_relevant_rag_results:
                             # Use RAG results - stream answer with citations
                             print("[IT Troubleshooting Stream] Using RAG-based answer")
-                            async for token in policy_tools.generate_answer_with_citations_stream(request.message, rag_chunks):
-                                accumulated_answer += token
-                                yield f"event: token\n"
-                                yield f"data: {json.dumps({'content': token, 'type': 'token'})}\n\n"
+                            llm_succeeded = False
+                            try:
+                                async for token in policy_tools.generate_answer_with_citations_stream(request.message, rag_chunks):
+                                    llm_succeeded = True
+                                    accumulated_answer += token
+                                    yield f"event: token\n"
+                                    yield f"data: {json.dumps({'content': token, 'type': 'token'})}\n\n"
+                            except Exception as rag_error:
+                                print(f"[IT Troubleshooting RAG Stream] LLM error: {rag_error}")
+                                # Fallback: Extract and format RAG content directly
+                                print("[IT Troubleshooting Stream] Falling back to direct RAG content")
+                                fallback_response = "Based on our documentation, here are some troubleshooting steps:\n\n"
+                                accumulated_answer += fallback_response
+                                for char in fallback_response:
+                                    yield f"event: token\n"
+                                    yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
 
-                            # Add JIRA offer at the end of RAG-based answers
+                                # Format RAG chunks as numbered steps
+                                for i, chunk in enumerate(rag_chunks[:3], 1):  # Top 3 chunks
+                                    content = chunk.get('content', '').strip()
+                                    if content:
+                                        step_text = f"**{i}. From {chunk.get('source', 'Documentation')}:**\n{content}\n\n"
+                                        accumulated_answer += step_text
+                                        for char in step_text:
+                                            yield f"event: token\n"
+                                            yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
+                                llm_succeeded = True  # Mark as handled
+
+                            # Add JIRA offer at the end
                             jira_offer = "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
                             accumulated_answer += jira_offer
                             for char in jira_offer:
@@ -982,12 +1170,30 @@ RULES:
                                 ("user", "{question}")
                             ])
 
-                            # Stream troubleshooting answer from LLM
-                            async for chunk in (prompt | policy_tools.llm).astream({"question": request.message}):
-                                if hasattr(chunk, 'content') and chunk.content:
-                                    accumulated_answer += chunk.content
+                            # Stream troubleshooting answer from LLM with error handling
+                            try:
+                                stream_started = False
+                                async for chunk in (prompt | policy_tools.llm).astream({"question": request.message}):
+                                    stream_started = True
+                                    if hasattr(chunk, 'content') and chunk.content:
+                                        accumulated_answer += chunk.content
+                                        yield f"event: token\n"
+                                        yield f"data: {json.dumps({'content': chunk.content, 'type': 'token'})}\n\n"
+
+                                # If no content was streamed, provide fallback
+                                if not stream_started or accumulated_answer == prefix:
+                                    fallback_msg = "I'm having trouble generating a response. Please try again."
+                                    accumulated_answer += fallback_msg
                                     yield f"event: token\n"
-                                    yield f"data: {json.dumps({'content': chunk.content, 'type': 'token'})}\n\n"
+                                    yield f"data: {json.dumps({'content': fallback_msg, 'type': 'token'})}\n\n"
+                            except Exception as llm_error:
+                                print(f"[IT Troubleshooting Stream] LLM error: {llm_error}")
+                                # Provide helpful fallback instead of error message
+                                fallback_steps = get_generic_troubleshooting_steps(request.message)
+                                accumulated_answer += fallback_steps
+                                for char in fallback_steps:
+                                    yield f"event: token\n"
+                                    yield f"data: {json.dumps({'content': char, 'type': 'token'})}\n\n"
 
                     elif specialist_intent == "follow_up_issue":
                         # User says previous solution didn't work - offer JIRA ticket
@@ -1116,10 +1322,23 @@ RULES:
                 'workflow_path': workflow_path
             })}\n\n"
 
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client disconnected - exit gracefully without logging error
+            client_disconnected = True
+            return
         except Exception as e:
-            print(f"[ERROR] Streaming chat failed: {e}")
-            yield f"event: error\n"
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            # Only log and send error if client is still connected
+            if not client_disconnected:
+                error_msg = str(e)
+                # Don't log connection-related errors as they're expected when client disconnects
+                if "closed" not in error_msg.lower() and "peer" not in error_msg.lower():
+                    print(f"[ERROR] Streaming chat failed: {e}")
+                try:
+                    yield f"event: error\n"
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                except (GeneratorExit, Exception):
+                    # Client disconnected while sending error
+                    pass
 
     return StreamingResponse(
         generate_stream(),

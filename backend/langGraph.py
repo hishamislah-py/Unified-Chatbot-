@@ -2,7 +2,7 @@ import os
 from typing import TypedDict, Literal
 from dotenv import load_dotenv
 
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
@@ -47,10 +47,14 @@ class PolicyTools:
         if PolicyTools._rag_system is None:
             raise ValueError("RAG system not initialized. Call PolicyTools.set_rag_system() first.")
         self.rag = PolicyTools._rag_system
-        self.llm = ChatGroq(
-            model="llama-3.1-8b-instant",
+        # Use Ollama LLM (OpenAI-compatible API)
+        self.llm = ChatOpenAI(
+            base_url=os.getenv("OLLAMA_BASE_URL", "https://ai.arttechgroup.com:7777/ollama/v1"),
+            model=os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct"),
             temperature=0,
-            groq_api_key=os.getenv("GROQ_API_KEY")
+            api_key="not-needed",  # Ollama doesn't require API key
+            timeout=30,  # 30 second timeout
+            max_retries=2,
         )
     
     def classify_intent(self, question: str) -> dict:
@@ -263,6 +267,127 @@ Reply with ONLY the category name, nothing else."""),
 
         return {"intent": intent, "category": "IT"}
 
+    def check_context_relevance(self, question: str, context_chunks: list) -> dict:
+        """
+        Check if retrieved context chunks are actually relevant to the user's question.
+        Uses a combination of keyword overlap and LLM-based relevance checking.
+
+        Args:
+            question: User's original question
+            context_chunks: List of retrieved chunks with 'content' and 'source' keys
+
+        Returns:
+            dict with: {"is_relevant": bool, "confidence": float, "reason": str}
+        """
+        if not context_chunks:
+            return {"is_relevant": False, "confidence": 1.0, "reason": "No context retrieved"}
+
+        # =================================================================
+        # STEP 1: Extract keywords from question
+        # =================================================================
+        question_lower = question.lower()
+
+        # Common IT-related keywords to look for
+        it_keywords = {
+            "teams": ["teams", "microsoft teams", "ms teams"],
+            "outlook": ["outlook", "email", "mail"],
+            "onedrive": ["onedrive", "one drive", "sync"],
+            "sharepoint": ["sharepoint", "share point", "permission"],
+            "vpn": ["vpn", "remote", "connection"],
+            "url": ["url", "website", "link", "browser"],
+            "hardware": ["mouse", "keyboard", "touchpad", "monitor", "camera", "mic", "microphone", "headset"],
+            "system": ["freezing", "frozen", "crash", "slow", "hanging"],
+            "vm": ["vm", "virtual machine", "windows vm"],
+        }
+
+        # Find which category the question belongs to
+        question_categories = set()
+        for category, keywords in it_keywords.items():
+            if any(kw in question_lower for kw in keywords):
+                question_categories.add(category)
+
+        # =================================================================
+        # STEP 2: Check if context sources match question categories
+        # =================================================================
+        source_matches = False
+        keyword_overlap_count = 0
+
+        for chunk in context_chunks:
+            source = chunk.get('source', '').lower()
+            content = chunk.get('content', '').lower()
+
+            # Check if source document name relates to question
+            for category, keywords in it_keywords.items():
+                if category in question_categories:
+                    # Check if source contains relevant keywords
+                    if any(kw in source for kw in keywords):
+                        source_matches = True
+                        break
+
+            # Count keyword overlap in content
+            for category in question_categories:
+                if any(kw in content for kw in it_keywords.get(category, [])):
+                    keyword_overlap_count += 1
+
+        # =================================================================
+        # STEP 3: Determine relevance
+        # =================================================================
+
+        # If source document matches the question topic, it's likely relevant
+        if source_matches:
+            return {
+                "is_relevant": True,
+                "confidence": 0.9,
+                "reason": "Source document matches question topic"
+            }
+
+        # If significant keyword overlap, it's probably relevant
+        if keyword_overlap_count >= 3:
+            return {
+                "is_relevant": True,
+                "confidence": 0.7,
+                "reason": f"Found {keyword_overlap_count} keyword matches in content"
+            }
+
+        # =================================================================
+        # STEP 4: LLM-based relevance check for uncertain cases
+        # =================================================================
+        # Only use LLM if we're uncertain
+        if keyword_overlap_count > 0:
+            # Some overlap but not certain - use quick LLM check
+            context_preview = "\n".join([
+                f"- Source: {c.get('source', 'Unknown')}: {c.get('content', '')[:200]}..."
+                for c in context_chunks[:2]
+            ])
+
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """Determine if the CONTEXT is relevant to answer the QUESTION.
+Reply with only YES or NO."""),
+                ("user", """QUESTION: {question}
+
+CONTEXT:
+{context}
+
+Is this context relevant to the question? (YES/NO)""")
+            ])
+
+            chain = prompt | self.llm | StrOutputParser()
+            response = chain.invoke({"question": question, "context": context_preview})
+
+            is_relevant = "yes" in response.lower().strip()
+            return {
+                "is_relevant": is_relevant,
+                "confidence": 0.6,
+                "reason": f"LLM relevance check: {response.strip()}"
+            }
+
+        # No keyword overlap - context is likely not relevant
+        return {
+            "is_relevant": False,
+            "confidence": 0.8,
+            "reason": "No keyword overlap between question and retrieved context"
+        }
+
     def retrieve_policy(self, question: str, category: str, num_chunks: int = 3) -> list:
         """
         Tool 2: Retrieve relevant policy documents with source tracking
@@ -368,10 +493,86 @@ Context:
 
         chain = prompt | self.llm
 
-        # Stream tokens from LLM
-        async for chunk in chain.astream({"context": context, "question": question}):
-            if hasattr(chunk, 'content') and chunk.content:
-                yield chunk.content
+        # Stream tokens from LLM with error handling
+        try:
+            has_content = False
+            async for chunk in chain.astream({"context": context, "question": question}):
+                if hasattr(chunk, 'content') and chunk.content:
+                    has_content = True
+                    yield chunk.content
+
+            if not has_content:
+                print("[PolicyTools] LLM returned no content")
+                raise Exception("LLM returned no content")
+        except Exception as e:
+            print(f"[PolicyTools] LLM streaming error: {e}")
+            # Re-raise so caller can handle with fallback
+            raise
+
+    def generate_hybrid_answer(self, question: str, context_chunks: list, use_rag: bool = True) -> dict:
+        """
+        Generate answer using either RAG context or LLM knowledge based on relevance.
+
+        Args:
+            question: User's question
+            context_chunks: Retrieved RAG chunks (may be empty or irrelevant)
+            use_rag: If True, use RAG context with citations. If False, use LLM knowledge.
+
+        Returns:
+            dict with "answer" and "sources" keys
+        """
+        if use_rag and context_chunks:
+            # Use RAG-based answer with citations
+            context = "\n\n".join([
+                f"[Source: {chunk['source']}, Page {chunk['page']}]\n{chunk['content']}"
+                for chunk in context_chunks
+            ])
+
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are a helpful IT Support assistant.
+
+Answer the user's question using the provided documentation.
+ALWAYS cite your sources using: [Source: filename, Page X]
+Be concise and practical.
+
+Documentation:
+{context}"""),
+                ("user", "{question}")
+            ])
+
+            chain = prompt | self.llm | StrOutputParser()
+            answer = chain.invoke({"context": context, "question": question})
+
+            sources = [
+                {
+                    "source": chunk['source'],
+                    "page": chunk['page'],
+                    "rank": chunk.get('rank', i+1),
+                    "preview": chunk['content'][:200] + "..." if len(chunk['content']) > 200 else chunk['content']
+                }
+                for i, chunk in enumerate(context_chunks)
+            ]
+
+            return {"answer": answer, "sources": sources}
+
+        else:
+            # Use LLM knowledge without RAG
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are a helpful IT Support specialist.
+
+Provide helpful troubleshooting steps for the user's technical issue.
+RULES:
+1. Give practical solutions the user can try immediately
+2. Format your response with clear numbered steps
+3. Start with the simplest solutions first
+4. Be concise but thorough"""),
+                ("user", "{question}")
+            ])
+
+            chain = prompt | self.llm | StrOutputParser()
+            answer = chain.invoke({"question": question})
+
+            return {"answer": answer, "sources": []}
 
     def generate_clarification(self, question: str, reason: str) -> str:
         """

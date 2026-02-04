@@ -259,9 +259,10 @@ class SimpleRAG:
             print(f"[RAG Filter] Matched documents: {sorted_docs}")
             return sorted_docs
 
-        # No matches found - return all documents
-        print(f"[RAG Filter] Query: '{query}' - No keyword matches, searching all documents")
-        return doc_list
+        # No matches found - return empty list to let semantic search handle it
+        # This prevents falling back to irrelevant documents
+        print(f"[RAG Filter] Query: '{query}' - No keyword matches, returning empty")
+        return []
 
     def search(self, question, num_results=3, doc_names=None):
         """
@@ -307,6 +308,86 @@ class SimpleRAG:
             formatted_results.append(result)
 
         return formatted_results
+
+    def search_with_scores(self, question, num_results=3, doc_names=None, score_threshold=1.0):
+        """
+        Search with similarity scores - returns only results above threshold.
+        Uses FAISS similarity_search_with_score which returns (doc, score) tuples.
+        Lower score = more similar in FAISS (L2 distance).
+
+        Args:
+            question: Your question
+            num_results: How many relevant chunks to find from EACH document
+            doc_names: List of document filenames to search (if None, searches all)
+            score_threshold: Maximum L2 distance to consider relevant (lower = stricter)
+                            Typical values: 0.5 (very strict), 1.0 (moderate), 1.5 (lenient)
+
+        Returns:
+            List of relevant text chunks with their sources and similarity scores
+        """
+        if not self.vector_stores:
+            raise ValueError("Please run setup() first!")
+
+        # Determine which documents to search
+        if doc_names is None:
+            search_docs = list(self.vector_stores.keys())
+        else:
+            search_docs = [doc for doc in doc_names if doc in self.vector_stores]
+
+        if not search_docs:
+            return []
+
+        # Search each specified document and collect results with scores
+        all_results = []
+        for doc_name in search_docs:
+            vector_store = self.vector_stores[doc_name]
+            # similarity_search_with_score returns list of (Document, score) tuples
+            results_with_scores = vector_store.similarity_search_with_score(question, k=num_results)
+
+            for doc, score in results_with_scores:
+                # Only include results below threshold (lower score = more similar)
+                if score <= score_threshold:
+                    all_results.append({
+                        "content": doc.page_content,
+                        "source": doc.metadata.get("source", "Unknown"),
+                        "page": doc.metadata.get("page", "Unknown"),
+                        "similarity_score": float(score)  # Lower is better
+                    })
+
+        # Sort by similarity score (ascending - lower is better)
+        all_results.sort(key=lambda x: x['similarity_score'])
+
+        # Rank all results
+        formatted_results = []
+        for i, result in enumerate(all_results, 1):
+            result["rank"] = i
+            formatted_results.append(result)
+
+        return formatted_results
+
+    def search_it_with_scores(self, question, num_results=3, score_threshold=1.0):
+        """
+        Search IT Support documents with similarity scores.
+        Uses keyword pre-filtering first, then returns scored results.
+
+        Args:
+            question: Your question
+            num_results: How many relevant chunks to find from each IT document
+            score_threshold: Maximum L2 distance to consider relevant
+
+        Returns:
+            List of relevant text chunks from IT Support documents with scores
+        """
+        # First: Find documents matching query keywords
+        matching_docs = self.find_matching_documents(question, self.it_documents)
+
+        # If no keyword matches, search ALL IT documents with scoring
+        # (but the score threshold will filter out irrelevant results)
+        if not matching_docs:
+            matching_docs = self.it_documents
+
+        # Then: Search with scores
+        return self.search_with_scores(question, num_results, doc_names=matching_docs, score_threshold=score_threshold)
 
     def search_hr_policies(self, question, num_results=3):
         """

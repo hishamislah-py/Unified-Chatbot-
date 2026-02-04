@@ -2,7 +2,7 @@ import os
 from typing import TYPE_CHECKING
 from dotenv import load_dotenv
 
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -19,10 +19,14 @@ class PersonalAssistantTools:
     """
 
     def __init__(self):
-        self.llm = ChatGroq(
-            model="llama-3.1-8b-instant",
+        # Use Ollama LLM (OpenAI-compatible API)
+        self.llm = ChatOpenAI(
+            base_url=os.getenv("OLLAMA_BASE_URL", "https://ai.arttechgroup.com:7777/ollama/v1"),
+            model=os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct"),
             temperature=0,
-            groq_api_key=os.getenv("GROQ_API_KEY")
+            api_key="not-needed",  # Ollama doesn't require API key
+            timeout=30,  # 30 second timeout
+            max_retries=2,
         )
 
     def classify_intent(self, message: str) -> dict:
@@ -157,10 +161,20 @@ A: "For detailed information about leave policies, I can connect you to our HR A
 
         chain = prompt | self.llm
 
-        # Use .astream() to get streaming response
-        async for chunk in chain.astream({"message": message}):
-            if hasattr(chunk, 'content') and chunk.content:
-                yield chunk.content
+        # Use .astream() to get streaming response with error handling
+        try:
+            has_content = False
+            async for chunk in chain.astream({"message": message}):
+                if hasattr(chunk, 'content') and chunk.content:
+                    has_content = True
+                    yield chunk.content
+
+            # If no content was generated, provide fallback
+            if not has_content:
+                yield "I'm having trouble generating a response. Please try again."
+        except Exception as e:
+            print(f"[PersonalAssistant] LLM streaming error: {e}")
+            yield "I'm having trouble connecting to my knowledge base. Please try again in a moment."
 
 
 def personal_assistant_node(state: "MultiAgentState") -> "MultiAgentState":

@@ -368,7 +368,8 @@ def it_out_of_scope_node(state: "MultiAgentState") -> "MultiAgentState":
 
 def it_troubleshooting_node(state: "MultiAgentState") -> "MultiAgentState":
     """
-    IT troubleshooting - FIRST checks RAG for relevant documents, then falls back to LLM knowledge
+    IT troubleshooting - FIRST checks RAG for relevant documents, then falls back to LLM knowledge.
+    Uses semantic relevance checking to determine if RAG results actually match the question.
     For technical issues like 'Teams not working', 'mouse not working', etc.
     """
     from langchain_core.prompts import ChatPromptTemplate
@@ -380,65 +381,87 @@ def it_troubleshooting_node(state: "MultiAgentState") -> "MultiAgentState":
     state['original_issue'] = state['current_message']
 
     tools = PolicyTools()
+    question = state['current_message']
 
     # =================================================================
-    # STEP 1: Check RAG first for relevant IT Support documents
+    # STEP 1: Retrieve documents from RAG
     # =================================================================
-    print(f"[IT Troubleshooting] Checking RAG first for: {state['current_message']}")
+    print(f"[IT Troubleshooting] Checking RAG for: {question}")
 
     # Force category to IT for RAG search
-    rag_chunks = tools.retrieve_policy(
-        state['current_message'],
-        "IT",
-        num_chunks=4
-    )
+    rag_chunks = tools.retrieve_policy(question, "IT", num_chunks=4)
 
-    # Check if RAG returned meaningful results
+    # =================================================================
+    # STEP 2: Check SEMANTIC RELEVANCE of retrieved chunks
+    # =================================================================
     has_relevant_rag_results = False
+
     if rag_chunks and len(rag_chunks) > 0:
-        # Check if any chunk has substantial content (not just metadata)
-        for chunk in rag_chunks:
-            if chunk.get('content') and len(chunk['content'].strip()) > 50:
-                has_relevant_rag_results = True
-                break
+        # Use semantic relevance check instead of just length check
+        relevance_result = tools.check_context_relevance(question, rag_chunks)
 
-    print(f"[IT Troubleshooting] RAG found relevant results: {has_relevant_rag_results}")
+        print(f"[IT Troubleshooting] Relevance check: {relevance_result}")
+
+        if relevance_result['is_relevant']:
+            has_relevant_rag_results = True
+        else:
+            # Also check for explicit keyword matches as fallback
+            # This handles cases where "teams" in question should match "Teams" document
+            question_lower = question.lower()
+            for chunk in rag_chunks:
+                source = chunk.get('source', '').lower()
+                # Direct source match check
+                if 'teams' in question_lower and 'teams' in source:
+                    has_relevant_rag_results = True
+                    print(f"[IT Troubleshooting] Source match found: {source}")
+                    break
+                elif 'url' in question_lower and 'url' in source:
+                    has_relevant_rag_results = True
+                    break
+                elif 'outlook' in question_lower and 'outlook' in source:
+                    has_relevant_rag_results = True
+                    break
+                elif 'onedrive' in question_lower and 'onedrive' in source:
+                    has_relevant_rag_results = True
+                    break
+                elif 'sharepoint' in question_lower and 'sharepoint' in source:
+                    has_relevant_rag_results = True
+                    break
+                elif ('mouse' in question_lower or 'keyboard' in question_lower or 'touchpad' in question_lower) and 'hardware' in source:
+                    has_relevant_rag_results = True
+                    break
+                elif ('camera' in question_lower or 'mic' in question_lower or 'headset' in question_lower) and ('camera' in source or 'mic' in source or 'headset' in source):
+                    has_relevant_rag_results = True
+                    break
+                elif ('freeze' in question_lower or 'freezing' in question_lower) and 'freezing' in source:
+                    has_relevant_rag_results = True
+                    break
+                elif 'screenshare' in question_lower and 'screenshare' in source:
+                    has_relevant_rag_results = True
+                    break
+                elif 'vm' in question_lower and 'vm' in source:
+                    has_relevant_rag_results = True
+                    break
+
+    print(f"[IT Troubleshooting] Final relevance decision: {has_relevant_rag_results}")
 
     # =================================================================
-    # STEP 2: If RAG has results, use them; otherwise use LLM knowledge
+    # STEP 3: Generate answer based on relevance
     # =================================================================
+    jira_offer = "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
+
     if has_relevant_rag_results:
         # Use RAG results - generate answer with citations
-        print("[IT Troubleshooting] Using RAG-based answer")
-        result = tools.generate_answer_with_citations(
-            state['current_message'],
-            rag_chunks
-        )
-        # Add JIRA offer at the end of RAG-based answers too
-        jira_offer = "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
+        print("[IT Troubleshooting] Using RAG-based answer with citations")
+        result = tools.generate_hybrid_answer(question, rag_chunks, use_rag=True)
         state['answer'] = f"[IT Support] {result['answer']}{jira_offer}"
         state['sources'] = result['sources']
     else:
-        # Fall back to LLM knowledge
-        print("[IT Troubleshooting] No RAG results, using LLM knowledge")
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an IT Support specialist. Provide helpful troubleshooting steps for the user's technical issue.
-
-RULES:
-1. Give practical solutions the user can try immediately
-2. Format your response with clear numbered steps
-3. Start with the simplest solutions first
-4. Be concise but thorough
-5. End with: "\n\nIf this doesn't resolve your issue, let me know and I can help create a JIRA ticket for further assistance."
-"""),
-            ("user", "{question}")
-        ])
-
-        chain = prompt | tools.llm | StrOutputParser()
-        answer = chain.invoke({"question": state['current_message']})
-
-        state['answer'] = f"[IT Support] {answer}"
-        state['sources'] = []
+        # Fall back to LLM knowledge (no citations)
+        print("[IT Troubleshooting] No relevant RAG results, using LLM knowledge")
+        result = tools.generate_hybrid_answer(question, rag_chunks, use_rag=False)
+        state['answer'] = f"[IT Support] {result['answer']}{jira_offer}"
+        state['sources'] = []  # No sources when using LLM knowledge
 
     state['is_valid'] = True
 
